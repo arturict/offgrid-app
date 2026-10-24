@@ -128,5 +128,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    // Runs the Room migration SQL on a plain SQLite database; Room's MigrationTestHelper needs a device.
+    testImplementation(libs.sqlite.jdbc)
     testImplementation(libs.kotlinx.coroutines.test)
 }

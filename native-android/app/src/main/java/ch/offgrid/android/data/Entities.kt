@@ -92,9 +92,11 @@ data class MessageEntity(
     val refSession: String? = null,
     /** Counter of the message within the conversation direction, used to match reactions. */
     val ctr: Int? = null,
-    /** Group messages: who wrote it. */
+    /** Group messages: who wrote it. [senderContactId] is null when the antenna holds no contact for the sender. */
     val senderContactId: Long? = null,
     val senderName: String? = null,
+    /** Group messages: NodeID of the sender (`group.received.node_id`), the only identity of a non-contact. */
+    val senderNodeId: String? = null,
     val rssi: Int? = null,
     /** SNR in dB of a received message (`msg.received.snr`). */
     val snr: Double? = null,
@@ -126,22 +128,66 @@ data class MessageEntity(
 )
 
 /**
- * A group chat. Groups are a proposed link extension (`group.*`, see README), because protocol and
- * link v1 put group chats out of scope.
+ * A group chat (link spec 6, "Groups"). The antenna holds the key and the member list; the app keeps the
+ * slot number plus display data and history. A group joined from another phone has [owner] false.
  */
 @Serializable
 @Entity(tableName = "groups")
 data class GroupEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val deviceId: String,
+    /** `group_id` slot (1 to 8) on that Heltec, or 0 once the antenna no longer holds the group. */
     val deviceGroupId: Int,
     val name: String,
     val createdAt: Long,
+    /** 8 hex digits, the same on every member; empty for groups from before database version 4. */
+    @ColumnInfo(defaultValue = "''")
+    val gid: String = "",
+    /** Counts every member change (1 to 255); a sync of an older epoch is worthless. */
+    @ColumnInfo(defaultValue = "1")
+    val epoch: Int = 1,
+    /** Only the owner adds and removes members and hands out the key. */
+    @ColumnInfo(defaultValue = "1")
+    val owner: Boolean = true,
 )
 
+/** Where the group key stands for one member (`group.sync` is an acknowledged direct message). */
+object KeyState {
+    /** Nothing to deliver: this phone is not the owner, or the group predates database version 4. */
+    const val NONE = "none"
+
+    /** Waiting to be handed to the antenna ("ausstehend"). */
+    const val QUEUED = "queued"
+
+    /** The antenna has the sync and waits for the member's ACK ("ausstehend"). */
+    const val PENDING = "pending"
+
+    /** The member acknowledged the key ("zugestellt"). */
+    const val DELIVERED = "delivered"
+
+    /** The sync ended without an ACK ("fehlgeschlagen"); [GroupMemberEntity.syncReason] says why. */
+    const val FAILED = "failed"
+}
+
+/**
+ * A member of a group other than this phone. [member] is the index in the group (the owner is 0); the
+ * contact is null for a member the antenna has no contact for, who is then only known by [nodeId].
+ */
 @Serializable
-@Entity(tableName = "group_members", primaryKeys = ["groupId", "contactId"])
-data class GroupMemberEntity(val groupId: Long, val contactId: Long)
+@Entity(tableName = "group_members", primaryKeys = ["groupId", "member"])
+data class GroupMemberEntity(
+    val groupId: Long,
+    val member: Int = 0,
+    val contactId: Long? = null,
+    val nodeId: String = "",
+    @ColumnInfo(defaultValue = "'none'")
+    val keyState: String = KeyState.NONE,
+    /** `msg_ref` of the open `group.sync`, with the link session it was confirmed in (see `OutboxReconciler`). */
+    val syncRef: Int? = null,
+    val syncSession: String? = null,
+    /** Why the sync failed: a `msg.status` reason, an error code or `lost`. */
+    val syncReason: String? = null,
+)
 
 @Entity(tableName = "settings")
 data class SettingEntity(@PrimaryKey val key: String, val value: String)

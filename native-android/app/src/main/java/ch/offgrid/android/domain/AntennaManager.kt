@@ -34,8 +34,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 
 enum class AntennaPhase { DISCONNECTED, SEARCHING, DEVICE_FOUND, CONNECTING, READY, ERROR }
@@ -87,6 +90,38 @@ enum class AntennaError {
 /** A `sec.state` "locked" event: why and when (wall clock of the phone). */
 data class LockEvent(val reason: String, val at: Long)
 
+/**
+ * What the antenna says about groups in `sys.hello` (link spec 6, "Groups"): `features` lists `"groups"` and
+ * `limits` carries the slots, the members per group (the owner included) and the text size. Firmware without
+ * the feature has no `group.*` commands, so the app shows no groups for it.
+ */
+data class GroupSupport(
+    val maxGroups: Int = DEFAULT_MAX_GROUPS,
+    val maxMembers: Int = DEFAULT_MAX_MEMBERS,
+    val maxTextBytes: Int = MessageLimits.DEFAULT_MAX_TEXT_BYTES,
+) {
+    /** Others a group of this phone can take: the app's cap [MessageLimits.MAX_GROUP_MEMBERS], less if the antenna allows fewer. */
+    val maxOtherMembers: Int get() = minOf(MessageLimits.MAX_GROUP_MEMBERS, maxMembers - 1)
+
+    companion object {
+        const val FEATURE = "groups"
+        const val DEFAULT_MAX_GROUPS = 8
+        const val DEFAULT_MAX_MEMBERS = 16
+
+        /** Null when [hello] does not list the feature. */
+        fun parse(hello: JsonObject): GroupSupport? {
+            val listed = (hello["features"] as? JsonArray)?.any { (it as? JsonPrimitive)?.contentOrNull == FEATURE } == true
+            if (!listed) return null
+            val limits = hello.obj("limits")
+            return GroupSupport(
+                maxGroups = limits?.int("max_groups") ?: DEFAULT_MAX_GROUPS,
+                maxMembers = limits?.int("max_group_members") ?: DEFAULT_MAX_MEMBERS,
+                maxTextBytes = limits?.int("max_group_text_bytes") ?: MessageLimits.DEFAULT_MAX_TEXT_BYTES,
+            )
+        }
+    }
+}
+
 data class AntennaState(
     val phase: AntennaPhase = AntennaPhase.DISCONNECTED,
     val kind: LinkKind = LinkKind.SIMULATED,
@@ -103,6 +138,8 @@ data class AntennaState(
     val textCodec: String = MessageLimits.CODEC_RAW,
     /** UTF-8 input the antenna accepts; above [maxTextBytes] only with a codec (`limits.max_text_input_bytes`). */
     val maxTextInputBytes: Int = MessageLimits.DEFAULT_MAX_TEXT_BYTES,
+    /** Null for firmware without the `groups` feature (`sys.hello.features`). */
+    val groups: GroupSupport? = null,
     val error: AntennaError? = null,
     /** The link error code behind [error], for the note on the connect screen. */
     val errorCode: String? = null,
@@ -336,7 +373,7 @@ class AntennaManager(
         val deviceState = hello.str("state")
         val labRadio = hello.bool("lab_radio") == true
         _state.update {
-            it.copy(deviceId = deviceId, maxTextBytes = maxText, fwVersion = hello.obj("fw")?.str("version"),
+            it.copy(deviceId = deviceId, maxTextBytes = maxText, groups = GroupSupport.parse(hello), fwVersion = hello.obj("fw")?.str("version"),
                 fwBuild = hello.obj("fw")?.str("build"), deviceLabel = chip ?: it.deviceLabel,
                 textCodec = hello.str("text_codec") ?: MessageLimits.CODEC_RAW,
                 maxTextInputBytes = hello.obj("limits")?.int("max_text_input_bytes") ?: maxText,
@@ -789,7 +826,7 @@ class AntennaManager(
 
         // sys.boot wait, up to 8 s of sys.hello retries, then sec.provision and the first reads.
         private const val SETUP_AFTER_RESET_TIMEOUT_MS = 40_000L
-        private val HELLO_ARGS = buildJsonObject { put("app", "offgrid-android"); put("app_proto", "1.0") }
+        private val HELLO_ARGS = buildJsonObject { put("app", "offgrid-android"); put("app_proto", "1.1") }
         private val RETRY_WITH_NEW_HELLO = setOf("E_NO_SESSION", "E_NOT_PROVISIONED", "E_ALREADY_PROVISIONED")
         private val LOCKED_CODES = setOf("E_LOCKED", "E_NOT_PROVISIONED")
 

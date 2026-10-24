@@ -44,10 +44,12 @@ data class SimTiming(
     val resendMs: Long = 60_000,
     /** ... or at once when its contact sends anything, until this long after it was queued; then `failed timeout`. */
     val parkMs: Long = 30 * 60_000L,
+    /** A `group.sync` takes this long to reach the member, and a simulated invitation to arrive, after the send. */
+    val groupSyncMs: Long = 1_500,
 )
 
 /** A message in the device's pending queue (`msg.pending` item). */
-private class SimPending(val ref: Int, val to: Int, val type: String, val ctr: Int?, val createdAt: Long) {
+private class SimPending(val ref: Int, val to: Int, val type: String, val ctr: Int?, val createdAt: Long, val group: Int? = null) {
     var state = "queued"
     var retry = 0
     var job: Job? = null
@@ -97,6 +99,7 @@ class SimulatedHeltec(
     private val pending = LinkedHashMap<Int, SimPending>()
     private val recent = ArrayDeque<SimRecent>()
     private var txPackets = 0
+    private var groupRxCtr = 0
     private var rxPackets = 0
     private var acksReceived = 0
     private var retriesScheduled = 0
@@ -263,7 +266,13 @@ class SimulatedHeltec(
             "mesh.set" -> { requireUnlocked(); meshSet(a) }
             "led.get" -> buildJsonObject { put("enabled", true); put("brightness", 128) }
             "group.create" -> groupCreate(a)
+            "group.list" -> groupList()
+            "group.get" -> { requireUnlocked(); buildJsonObject { put("group", groupJson(group(a), withMembers = true)) } }
+            "group.sync" -> groupSync(a)
+            "group.add" -> groupAdd(a)
+            "group.remove" -> groupRemove(a)
             "group.send" -> groupSend(a)
+            "group.delete" -> groupDelete(a)
             else -> throw CommandError("E_UNKNOWN_CMD", "unknown command ${r.cmd}", "cmd")
         }
     }
@@ -335,6 +344,7 @@ class SimulatedHeltec(
             put("device", "heltec_wifi_lora_32_v3"); put("chip", "ESP32-S3"); put("device_id", flash.deviceId)
             putJsonObject("fw") { put("version", fwVersion); put("build", "simulator") }
             put("proto", PROTO); put("state", state); put("mock", mockImage); put("radio_diagnostics", false)
+            putJsonArray("features") { add(JsonPrimitive("groups")) }
             put("authentication", "x25519-aes256gcm"); put("config_storage", "nvs")
             if (labRadio) {
                 put("lab_radio", true); put("text_codec", flash.textCodec)
@@ -346,6 +356,8 @@ class SimulatedHeltec(
             putJsonObject("limits") {
                 put("max_line", 2048); put("max_contacts", 32)
                 put("max_text_bytes", MessageLimits.DEFAULT_MAX_TEXT_BYTES); put("pending_queue", 8)
+                put("max_groups", MAX_GROUPS); put("max_group_members", MAX_GROUP_MEMBERS)
+                put("max_group_text_bytes", MessageLimits.DEFAULT_MAX_TEXT_BYTES)
                 if (labRadio) put("max_text_input_bytes", maxTextInputBytes())
             }
             putJsonObject("recovery") { put("master", "ECDSA-P256-SHA256"); put("app_wrap_label", "og-reset-wrap-v1") }
@@ -367,6 +379,7 @@ class SimulatedHeltec(
         putJsonObject("security") { put("secure_boot", false); put("flash_encryption", false) }
         if (state == "unlocked") {
             putJsonObject("contacts") { put("used", flash.contacts.size); put("capacity", 32) }
+            putJsonObject("groups") { put("used", flash.groups.size); put("capacity", MAX_GROUPS) }
             putJsonObject("queue") { put("pending", pending.size); put("capacity", 8); put("dropped_events", 0); put("dropped_acks", 0) }
         }
     }
@@ -645,14 +658,17 @@ class SimulatedHeltec(
         }
     }
 
-    private fun enqueue(to: Int, type: String, ctr: Int?): SimPending {
-        val p = SimPending(nextRef++, to, type, ctr, clock())
+    private fun enqueue(to: Int, type: String, ctr: Int?, group: Int? = null): SimPending {
+        val p = SimPending(nextRef++, to, type, ctr, clock(), group)
         pending[p.ref] = p
         return p
     }
 
     private fun statusData(p: SimPending, reason: String?, extra: JsonObjectBuilder.() -> Unit = {}) = buildJsonObject {
-        put("msg_ref", p.ref); put("to", p.to); put("state", p.state); put("retry", p.retry)
+        put("msg_ref", p.ref)
+        if (p.to > 0) put("to", p.to)
+        if (p.group != null) put("group_id", p.group)
+        put("state", p.state); put("retry", p.retry)
         if (reason != null) put("reason", reason)
         extra()
     }
@@ -695,7 +711,8 @@ class SimulatedHeltec(
         putJsonArray("pending") {
             pending.values.forEach { p ->
                 add(buildJsonObject {
-                    put("msg_ref", p.ref); put("to", p.to); put("type", p.type); put("ctr", p.ctr)
+                    put("msg_ref", p.ref); if (p.to > 0) put("to", p.to); if (p.group != null) put("group_id", p.group)
+                    put("type", p.type); put("ctr", p.ctr)
                     put("state", p.state); put("retry", p.retry)
                 })
             }
@@ -717,6 +734,7 @@ class SimulatedHeltec(
     private suspend fun deliver(p: SimPending, ack: Boolean, args: JsonObject) {
         delay(timing.firstTxMs)
         if (!synchronized(lock) { progress(p, "sent") }) return
+        if (p.type == "group_sync") delay(timing.groupSyncMs)
         if (!ack) {
             val peer = synchronized(lock) {
                 finish(p, "sent", null)
@@ -797,7 +815,7 @@ class SimulatedHeltec(
     }
 
     /** A valid packet from [peer] arrived: deliver it to the app and activate the contact. */
-    private fun incoming(peer: VirtualPeer, contactId: Int, body: JsonObject, group: Int? = null) {
+    private fun incoming(peer: VirtualPeer, contactId: Int, body: JsonObject) {
         if (state != "unlocked" || !reachable(peer)) return
         val c = flash.contacts.firstOrNull { it.contactId == contactId } ?: return
         rxPackets++
@@ -805,7 +823,6 @@ class SimulatedHeltec(
         updateContact(c.copy(rxHighestCtr = ctr, lastRssi = peer.rssi, lastSnr = peer.snr))
         emitEvent("msg.received", buildJsonObject {
             put("from", contactId)
-            if (group != null) put("group", group)
             body.forEach { (k, v) -> put(k, v) }
             if (labRadio && body.str("type") == "text") put("compressed", false)
             put("ctr", ctr); put("hops", 0); put("retry", 0); put("rssi", peer.rssi.toDouble()); put("snr", peer.snr)
@@ -935,7 +952,46 @@ class SimulatedHeltec(
         }
     }
 
-    // ---------------------------------------------------------------- groups (proposed link 1.1 extension)
+    // ---------------------------------------------------------------- groups (link spec 6, "Groups")
+
+    private fun group(a: JsonObject): SimGroup {
+        val id = a.int("group_id") ?: throw CommandError("E_INVALID_ARG", "group_id missing", "group_id")
+        return flash.groups.firstOrNull { it.groupId == id } ?: throw CommandError("E_NO_SUCH_GROUP", "no group $id")
+    }
+
+    private fun ownedGroup(a: JsonObject): SimGroup =
+        group(a).also { if (!it.owner) throw CommandError("E_INVALID_ARG", "only the owner changes the group", "group_id") }
+
+    private fun updateGroup(g: SimGroup) {
+        save(flash.copy(groups = flash.groups.map { if (it.groupId == g.groupId) g else it }))
+    }
+
+    private fun groupJson(g: SimGroup, withMembers: Boolean) = buildJsonObject {
+        put("group_id", g.groupId); put("gid", g.gid); put("name", g.name); put("epoch", g.epoch); put("owner", g.owner)
+        put("owner_contact_id", g.ownerContactId); put("member", g.ownMember); put("member_count", g.members.size + 1)
+        if (withMembers) {
+            putJsonArray("members") {
+                add(buildJsonObject { put("member", g.ownMember); put("node_id", nodeId()); put("contact_id", JsonNull) })
+                g.members.forEach { m ->
+                    add(buildJsonObject { put("member", m.member); put("node_id", m.nodeId); put("contact_id", m.contactId) })
+                }
+            }
+        }
+    }
+
+    private fun intList(a: JsonObject, key: String): List<Int> {
+        val ids = (a[key] as? JsonArray)?.map { (it as? JsonPrimitive)?.takeIf { p -> !p.isString }?.content?.toIntOrNull() }
+            ?: throw CommandError("E_INVALID_ARG", "$key missing", key)
+        if (ids.any { it == null } || ids.distinct().size != ids.size) throw CommandError("E_INVALID_ARG", "$key must be distinct integers", key)
+        return ids.filterNotNull()
+    }
+
+    private fun membersFor(contactIds: List<Int>, firstIndex: Int): List<SimGroupMember> = contactIds.mapIndexed { i, id ->
+        val c = flash.contacts.firstOrNull { it.contactId == id } ?: throw CommandError("E_NO_SUCH_CONTACT", "no contact $id")
+        SimGroupMember(firstIndex + i, c.nodeId, c.contactId)
+    }
+
+    private fun freeGroupSlot(): Int? = (1..MAX_GROUPS).firstOrNull { s -> flash.groups.none { it.groupId == s } }
 
     private fun groupCreate(a: JsonObject): JsonObject {
         requireUnlocked()
@@ -943,52 +999,146 @@ class SimulatedHeltec(
         if (name.isEmpty() || MessageLimits.utf8Bytes(name) > MessageLimits.MAX_NAME_BYTES) {
             throw CommandError("E_INVALID_ARG", "name must be 1 to 24 bytes", "name")
         }
-        val members = (a["members"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content?.toIntOrNull() }
-            ?: throw CommandError("E_INVALID_ARG", "members missing", "members")
-        if (members.isEmpty() || members.size > MessageLimits.MAX_GROUP_MEMBERS) {
-            throw CommandError("E_INVALID_ARG", "1 to 8 members", "members")
-        }
-        members.forEach { id ->
-            val c = flash.contacts.firstOrNull { it.contactId == id } ?: throw CommandError("E_NO_SUCH_CONTACT", "no contact $id")
-            if (c.state != "active") throw CommandError("E_INVALID_ARG", "contact $id is pending", "members")
-        }
-        val id = (flash.groups.maxOfOrNull { it.groupId } ?: 0) + 1
-        save(flash.copy(groups = flash.groups + SimGroup(id, name, members)))
+        val ids = intList(a, "members")
+        if (ids.isEmpty() || ids.size > MAX_GROUP_MEMBERS - 1) throw CommandError("E_INVALID_ARG", "1 to 15 members", "members")
+        val members = membersFor(ids, firstIndex = 1)
+        val slot = freeGroupSlot() ?: throw CommandError("E_STORAGE_FULL", "all group slots are used")
+        val g = SimGroup(slot, OgCrypto.hex(OgCrypto.randomBytes(4)).uppercase(), name, epoch = 1, owner = true, ownMember = 0, members = members)
+        save(flash.copy(groups = flash.groups + g))
+        return buildJsonObject { put("group", groupJson(g, withMembers = true)) }
+    }
+
+    private fun groupList(): JsonObject {
+        requireUnlocked()
         return buildJsonObject {
-            put("group_id", id); put("name", name)
-            putJsonArray("members") { members.forEach { add(JsonPrimitive(it)) } }
+            putJsonArray("groups") { flash.groups.sortedBy { it.groupId }.forEach { add(groupJson(it, withMembers = false)) } }
+            put("total", flash.groups.size)
         }
     }
 
+    /** `group.sync`: the current key and member list to one member as an acknowledged DM; its `msg.status` carries `to` and `group_id`. */
+    private fun groupSync(a: JsonObject): JsonObject {
+        requireUnlocked()
+        val g = ownedGroup(a)
+        val to = a.int("contact_id") ?: throw CommandError("E_INVALID_ARG", "contact_id missing", "contact_id")
+        val c = flash.contacts.firstOrNull { it.contactId == to } ?: throw CommandError("E_NO_SUCH_CONTACT", "no contact $to")
+        if (g.members.none { it.contactId == to }) throw CommandError("E_INVALID_ARG", "contact is not a member", "contact_id")
+        if (pending.size >= 8) throw CommandError("E_QUEUE_FULL", "pending queue is full")
+        val hops = a.int("hops") ?: flash.hopDefault
+        if (hops !in 0..7) throw CommandError("E_INVALID_ARG", "hops must be 0 to 7", "hops")
+        val ctr = c.txCtr + 1
+        updateContact(c.copy(txCtr = ctr))
+        val p = enqueue(to, "group_sync", ctr, group = g.groupId)
+        p.job = scope.launch { deliver(p, ack = true, args = a) }
+        val onAir = 17 + 33
+        return buildJsonObject {
+            put("msg_ref", p.ref); put("ctr", ctr); put("ack_requested", true); put("hops", hops); put("state", "queued")
+            put("bytes_on_air", onAir); put("est_airtime_ms", 120 + onAir * 4)
+        }
+    }
+
+    /** A member change starts a new epoch; syncs of the old one are cancelled (their `msg.status` follows the response). */
+    private fun newEpoch(g: SimGroup, members: List<SimGroupMember>): SimGroup {
+        if (g.epoch >= 255) throw CommandError("E_BUSY", "epoch 255 reached, create a new group")
+        val next = g.copy(epoch = g.epoch + 1, members = members)
+        pending.values.filter { it.type == "group_sync" && it.group == g.groupId }
+            .forEach { finish(it, "cancelled", null, afterResponse = true, stop = true) }
+        updateGroup(next)
+        return next
+    }
+
+    private fun groupAdd(a: JsonObject): JsonObject {
+        requireUnlocked()
+        val g = ownedGroup(a)
+        val ids = intList(a, "members")
+        if (ids.isEmpty() || ids.any { id -> g.members.any { it.contactId == id } }) {
+            throw CommandError("E_INVALID_ARG", "members must be new contacts", "members")
+        }
+        if (g.members.size + 1 + ids.size > MAX_GROUP_MEMBERS) throw CommandError("E_INVALID_ARG", "a group takes 16 members", "members")
+        val firstIndex = (g.members.maxOfOrNull { it.member } ?: 0) + 1
+        val next = newEpoch(g, g.members + membersFor(ids, firstIndex))
+        return buildJsonObject { put("group", groupJson(next, withMembers = true)) }
+    }
+
+    private fun groupRemove(a: JsonObject): JsonObject {
+        requireUnlocked()
+        val g = ownedGroup(a)
+        val indexes = intList(a, "members")
+        if (indexes.isEmpty() || indexes.any { i -> i == 0 || g.members.none { it.member == i } }) {
+            throw CommandError("E_INVALID_ARG", "members must be member indexes other than 0", "members")
+        }
+        val rest = g.members.filter { it.member !in indexes }
+        if (rest.isEmpty()) throw CommandError("E_INVALID_ARG", "at least 2 members stay", "members")
+        return buildJsonObject { put("group", groupJson(newEpoch(g, rest), withMembers = true)) }
+    }
+
+    private fun groupDelete(a: JsonObject): JsonObject {
+        requireUnlocked()
+        val g = group(a)
+        if (a.bool("confirm") != true) throw CommandError("E_CONFIRM_REQUIRED", "confirm must be true", "confirm")
+        pending.values.filter { it.group == g.groupId }.forEach { finish(it, "cancelled", null, afterResponse = true, stop = true) }
+        save(flash.copy(groups = flash.groups.filter { it.groupId != g.groupId }))
+        return buildJsonObject { put("deleted", true) }
+    }
+
+    /** `group.send`: no receipt and no retries, `sent` is final; `ack: true` is refused. */
     private fun groupSend(a: JsonObject): JsonObject {
         requireUnlocked()
-        val gid = a.int("group_id") ?: throw CommandError("E_INVALID_ARG", "group_id missing", "group_id")
-        val group = flash.groups.firstOrNull { it.groupId == gid } ?: throw CommandError("E_INVALID_ARG", "no group $gid", "group_id")
-        val text = a.str("text") ?: throw CommandError("E_INVALID_ARG", "text missing", "text")
-        val n = MessageLimits.utf8Bytes(text)
-        if (n == 0 || n > MessageLimits.DEFAULT_MAX_TEXT_BYTES) throw CommandError("E_TOO_LONG", "text is $n bytes", "text")
-        val p = enqueue(0, "text", null)
+        val g = group(a)
+        val type = a.str("type") ?: throw CommandError("E_INVALID_ARG", "type missing", "type")
+        if (a.bool("ack") == true) throw CommandError("E_INVALID_ARG", "group messages have no receipts", "ack")
+        val body = when (type) {
+            "text" -> {
+                val text = a.str("text") ?: throw CommandError("E_INVALID_ARG", "text missing", "text")
+                val n = MessageLimits.utf8Bytes(text)
+                if (n == 0) throw CommandError("E_INVALID_ARG", "text is empty", "text")
+                if (n > MessageLimits.DEFAULT_MAX_TEXT_BYTES) throw CommandError("E_TOO_LONG", "text is $n bytes", "text")
+                n
+            }
+            "geo" -> {
+                if (a.double("lat") == null || a.double("lon") == null) throw CommandError("E_INVALID_ARG", "lat and lon missing", "lat")
+                6
+            }
+            else -> throw CommandError("E_INVALID_ARG", "type must be text or geo", "type")
+        }
+        if (pending.size >= 8) throw CommandError("E_QUEUE_FULL", "pending queue is full")
+        val hops = a.int("hops") ?: flash.hopDefault
+        if (hops !in 0..7) throw CommandError("E_INVALID_ARG", "hops must be 0 to 7", "hops")
+        val ctr = g.txCtr + 1
+        updateGroup(g.copy(txCtr = ctr))
+        val p = enqueue(0, type, ctr, group = g.groupId)
         p.job = scope.launch {
-            delay(400)
+            delay(timing.firstTxMs)
             synchronized(lock) {
                 txPackets++
-                finish(p, "sent", null) { put("group", gid) }
+                finish(p, "sent", null)
             }
-            if (text.contains('?')) {
+            if (type == "text" && a.str("text")!!.contains('?')) {
                 val replier = synchronized(lock) {
-                    group.members.firstNotNullOfOrNull { id -> peerFor(id)?.takeIf { reachable(it) }?.let { id to it } }
+                    g.members.firstNotNullOfOrNull { m -> m.contactId?.let { id -> peerFor(id)?.takeIf { reachable(it) }?.let { m to it } } }
                 }
                 if (replier != null) {
                     delay(3_000)
-                    synchronized(lock) {
-                        incoming(replier.second, replier.first, buildJsonObject {
-                            put("type", "text"); put("text", replier.second.replies.firstOrNull() ?: "Ok")
-                        }, group = gid)
-                    }
+                    synchronized(lock) { groupIncoming(g.groupId, replier.first, replier.second.replies.firstOrNull() ?: "Ok") }
                 }
             }
         }
-        return buildJsonObject { put("msg_ref", p.ref); put("ack_requested", false); put("state", "queued") }
+        val bytes = 17 + body
+        return buildJsonObject {
+            put("msg_ref", p.ref); put("ctr", ctr); put("ack_requested", false); put("hops", hops); put("state", "queued")
+            put("bytes_on_air", bytes); put("est_airtime_ms", 120 + bytes * 4)
+        }
+    }
+
+    /** A text from [from] arrived in a group: `group.received`, with `from` null when the board has no contact for the NodeID. */
+    private fun groupIncoming(groupId: Int, from: SimGroupMember, text: String) {
+        if (state != "unlocked") return
+        if (flash.groups.none { it.groupId == groupId }) return
+        rxPackets++
+        emitEvent("group.received", buildJsonObject {
+            put("type", "text"); put("text", text); put("group_id", groupId); put("member", from.member); put("node_id", from.nodeId)
+            put("from", from.contactId); put("ctr", ++groupRxCtr); put("retry", 0); put("hops", 0); put("rssi", -72.0); put("snr", 9.0)
+        })
     }
 
     // ---------------------------------------------------------------- test harness API (not part of the protocol)
@@ -1024,6 +1174,35 @@ class SimulatedHeltec(
     fun peerSays(contactId: Int, text: String) = synchronized(lock) {
         val peer = peerFor(contactId) ?: return@synchronized
         incoming(peer, contactId, buildJsonObject { put("type", "text"); put("text", text) })
+    }
+
+    /**
+     * A virtual peer (a paired contact) owns a group and invites us: after [SimTiming.groupSyncMs] the board
+     * applies the sync and reports `group.state joined`, as the firmware does once the owner's key arrives.
+     * [others] are further members, given by NodeID, that the board holds no contact for. Returns the slot.
+     */
+    fun peerInvites(contactId: Int, name: String, others: List<String> = emptyList()): Int = synchronized(lock) {
+        val c = flash.contacts.firstOrNull { it.contactId == contactId } ?: error("no contact $contactId")
+        val slot = freeGroupSlot() ?: error("all group slots are used")
+        val members = listOf(SimGroupMember(0, c.nodeId, c.contactId)) +
+            others.mapIndexed { i, node -> SimGroupMember(i + 2, node.uppercase(), null) }
+        val g = SimGroup(slot, OgCrypto.hex(OgCrypto.randomBytes(4)).uppercase(), name, epoch = 1, owner = false,
+            ownMember = 1, members = members, ownerContactId = c.contactId)
+        scope.launch {
+            delay(timing.groupSyncMs)
+            synchronized(lock) {
+                if (state != "unlocked") return@synchronized
+                save(flash.copy(groups = flash.groups + g))
+                emitEvent("group.state", buildJsonObject { put("group_id", slot); put("state", "joined"); put("epoch", 1) })
+            }
+        }
+        slot
+    }
+
+    /** Member [member] of group [groupId] says [text] (the owner is member 0). */
+    fun memberSays(groupId: Int, member: Int, text: String) = synchronized(lock) {
+        val m = flash.groups.firstOrNull { it.groupId == groupId }?.members?.firstOrNull { it.member == member } ?: return@synchronized
+        groupIncoming(groupId, m, text)
     }
 
     fun setPeerInRange(contactId: Int, inRange: Boolean) = synchronized(lock) {
@@ -1066,7 +1245,9 @@ class SimulatedHeltec(
         private const val PAIR_WINDOW_MS = 300_000L
         private const val PAIR_RENEW_MS = 60_000L
         private val NODE_ID = Regex("^[0-9A-Fa-f]{4}$")
-        const val PROTO = "1.0"
+        const val PROTO = "1.1"
+        private const val MAX_GROUPS = 8
+        private const val MAX_GROUP_MEMBERS = 16
         private const val RECENT_CAPACITY = 16
         private const val OGZ1_MAX_TEXT_INPUT_BYTES = 160
 

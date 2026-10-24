@@ -288,6 +288,8 @@ fun ChatComposer(
     antenna: AntennaState,
     onSend: () -> Unit,
     onLocation: (() -> Unit)?,
+    /** A group chat counts plain UTF-8 bytes against `max_group_text_bytes`; the lab codec does not apply to groups. */
+    groupMaxBytes: Int? = null,
 ) {
     val ready = antenna.ready
     Composer(
@@ -297,11 +299,12 @@ fun ChatComposer(
         label = "Nachricht an $target",
         sendLabel = if (ready) "Senden" else "In Warteschlange legen",
         // On air, not typed: a lab image with the OGZ1 codec fits more text into the same bytes.
-        usedBytes = MessageLimits.onAirTextBytes(draft, antenna.textCodec, antenna.maxTextInputBytes),
-        maxBytes = antenna.maxTextBytes,
+        usedBytes = if (groupMaxBytes != null) MessageLimits.utf8Bytes(draft)
+        else MessageLimits.onAirTextBytes(draft, antenna.textCodec, antenna.maxTextInputBytes),
+        maxBytes = groupMaxBytes ?: antenna.maxTextBytes,
         onSend = onSend,
         onLocation = onLocation,
-        parts = MessageLimits.split(draft, antenna).size,
+        parts = if (groupMaxBytes != null) MessageLimits.splitRaw(draft, groupMaxBytes).size else MessageLimits.split(draft, antenna).size,
         maxParts = MessageLimits.MAX_PARTS,
     )
 }

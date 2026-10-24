@@ -126,7 +126,7 @@ class BackupService(
     /** Replaces all local data, keeps the old phone's token for one unlock, then reconnects. */
     suspend fun import(text: String, password: String) {
         val data = withContext(Dispatchers.Default) { BackupCodec.decrypt(text, password) }
-        db.maintenance().replaceAll(data.contacts, data.messages, data.groups, data.groupMembers)
+        db.maintenance().replaceAll(data.contacts, data.messages, data.groups, uniqueMemberIndexes(data.groupMembers))
         data.displayName?.let { settings.put(Settings.DISPLAY_NAME, it) }
         settings.put(Settings.ONBOARDED, "true")
         data.unlock?.let {
@@ -138,6 +138,16 @@ class BackupService(
     }
 
     companion object {
+        /**
+         * Backups from before database version 4 have no member index (it reads as 0 for all of them). Members of one
+         * group without distinct indexes get 1, 2, ... in file order, so they fit the (group, member) key.
+         */
+        internal fun uniqueMemberIndexes(members: List<GroupMemberEntity>): List<GroupMemberEntity> =
+            members.groupBy { it.groupId }.values.flatMap { group ->
+                if (group.map { it.member }.distinct().size == group.size) group
+                else group.mapIndexed { i, m -> m.copy(member = i + 1) }
+            }
+
         /** `offgrid-backup-YYYY-MM-DD.ogx` in Swiss local time. */
         fun fileName(now: Long): String = "offgrid-backup-${Instant.ofEpochMilli(now).atZone(Formats.ZONE).toLocalDate()}.ogx"
     }

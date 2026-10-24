@@ -28,8 +28,9 @@ object MessageDetails {
         }
     }
 
-    /** True when the antenna refused the message (an `E_…` code from `msg.send`, or no contact slot). */
-    fun failedBeforeSending(reason: String?): Boolean = reason != null && (reason.startsWith("E_") || reason == "no_contact")
+    /** True when the antenna refused the message (an `E_…` code from `msg.send` or `group.send`, or no contact or group slot). */
+    fun failedBeforeSending(reason: String?): Boolean =
+        reason != null && (reason.startsWith("E_") || reason == "no_contact" || reason == "no_group")
 
     /** Why a message failed, for the details sheet. */
     fun reason(reason: String?): String? = when (reason) {
@@ -41,9 +42,11 @@ object MessageDetails {
         "contact_deleted" -> "Kontakt auf der Antenne gelöscht"
         "radio_error" -> "Funkfehler der Antenne"
         "no_contact" -> "Kontakt ist nicht auf der Antenne"
+        "no_group" -> "Gruppe ist nicht auf der Antenne"
         "E_TOO_LONG" -> "Zu lang für ein Funkpaket"
         "E_BUSY" -> "Zähler aufgebraucht, bitte neu koppeln"
         "E_NO_SUCH_CONTACT" -> "Kontakt ist nicht auf der Antenne"
+        "E_NO_SUCH_GROUP" -> "Gruppe ist nicht auf der Antenne"
         "E_RADIO" -> "Funkmodul der Antenne nicht bereit"
         "E_INVALID_ARG" -> "Die Antenne hat die Nachricht abgelehnt"
         else -> reason

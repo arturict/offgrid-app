@@ -104,7 +104,8 @@ fun ContactsScreen(nav: NavHostController) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OgIconButton(OgIcon.Settings, "Einstellungen", { nav.navigate(Routes.SETTINGS) })
                     if (!empty) {
-                        if (list.count { it.contact?.state == "active" } > 0) {
+                        // Only firmware that lists the "groups" feature in sys.hello has group.* commands.
+                        if (antenna.groups != null && list.count { it.contact?.state == "active" } > 0) {
                             OgIconButton(OgIcon.Users, "Gruppe erstellen", { nav.navigate(Routes.NEW_GROUP) })
                         }
                         OgIconButton(OgIcon.Plus, "Kontakt hinzufügen", { nav.navigate(Routes.add()) })

@@ -40,7 +40,8 @@ fun messageRows(messages: List<MessageEntity>, now: Long): List<MessageRow> = bu
                 groupStart = previous != null && previous.direction != m.direction,
                 continued = m.direction == "out" && previous?.direction == "out" && previous.status != MessageStatus.FAILED,
                 showSender = m.direction == "in" &&
-                    (previous == null || previous.direction != "in" || previous.senderContactId != m.senderContactId),
+                    (previous == null || previous.direction != "in" || previous.senderContactId != m.senderContactId ||
+                        previous.senderNodeId != m.senderNodeId),
                 key = "msg-${m.id}",
             ),
         )
