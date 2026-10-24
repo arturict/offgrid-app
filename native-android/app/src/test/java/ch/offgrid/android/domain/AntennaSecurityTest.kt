@@ -309,6 +309,51 @@ class AntennaSecurityTest {
         assertNull(settings.get(Settings.TRANSFER_TOKEN))
     }
 
+    @Test
+    fun awaitSetUpReturnsOnceTheResetAntennaIsReadyAgain() = runBlocking {
+        val m = manager("phone-a")
+        m.connect()
+        m.settle()
+        assertEquals(ResetResult.DONE, m.factoryReset())
+        assertTrue(m.awaitSetUp())
+        assertEquals(AntennaPhase.READY, m.state.value.phase)
+    }
+
+    @Test
+    fun refusedResetsLeaveContactsOnTheAntenna() = runBlocking {
+        val owner = manager("phone-a")
+        owner.connect()
+        owner.settle()
+        val qr = device.addVirtualPeer("Anna", -90)
+        owner.call("pair.begin")
+        owner.call("pair.complete", buildJsonObject { put("qr", qr) })
+        val nodeId = owner.state.value.nodeId
+        owner.disconnect()
+
+        // Another phone is refused, and its failed attempts end in the antenna's rate limit.
+        val stranger = manager("phone-b")
+        stranger.connect()
+        stranger.settle()
+        assertEquals(ResetResult.WRONG_PHONE, stranger.factoryReset())
+        assertEquals(ResetResult.WRONG_PHONE, stranger.factoryReset())
+        assertEquals(ResetResult.WRONG_PHONE, stranger.factoryReset())
+        assertEquals(ResetResult.RATE_LIMITED, stranger.factoryReset())
+        stranger.disconnect()
+
+        device.powerCycle()
+        val back = manager("phone-a")
+        back.connect()
+        // The backoff may still run for a moment; the session retries on its own.
+        withTimeout(30_000) { back.state.first { it.phase == AntennaPhase.READY } }
+        assertEquals(nodeId, back.state.value.nodeId)
+        assertEquals(1, back.call("contact.list", buildJsonObject { put("offset", 0); put("limit", 10) }).int("total"))
+    }
+
+    @Test
+    fun withoutAnAntennaSessionNothingIsReset() = runBlocking {
+        assertEquals(ResetResult.NOT_CONNECTED, manager("phone-a").factoryReset())
+    }
+
     private object NoopListener : AntennaListener {
         override suspend fun onReady(antenna: AntennaManager, deviceId: String) {}
         override suspend fun onEvent(event: Incoming.Event) {}

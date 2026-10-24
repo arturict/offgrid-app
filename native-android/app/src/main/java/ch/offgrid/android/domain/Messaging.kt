@@ -64,6 +64,9 @@ class Messaging(
 
     /** Held while refs are handed out, matched or reconciled, so an event never sees half an update. */
     private val refMutex = Mutex()
+
+    /** Serializes the two writers that mark contacts [UNPAIRED], so a reset is not counted twice in [Settings.REPAIR_NOTICE]. */
+    private val contactMutex = Mutex()
     private var currentDevice: String? = null
 
     /** Link session whose refs `msg.status` events may update; null until the outbox was reconciled. */
@@ -268,6 +271,42 @@ class Messaging(
     }
 
     /**
+     * "Antenne auf Werkseinstellungen zurücksetzen" (link spec 11). The antenna loses its identity and all
+     * contact keys, so once it accepted, the contacts that lived on it become [UNPAIRED] ("Neu koppeln") and
+     * their open messages fail; chats and history stay. Nothing is sent. Then the antenna restarts and is set
+     * up again for this phone. Any other result leaves the app data as it was. Returns [ResetResult.DONE] when the
+     * antenna is ready again, [ResetResult.DONE_NOT_RECONNECTED] when it accepted but has not come back in time.
+     */
+    suspend fun resetAntenna(): ResetResult {
+        val result = reset()
+        if (result != ResetResult.DONE) return result
+        return if (antenna.awaitSetUp()) ResetResult.DONE else ResetResult.DONE_NOT_RECONNECTED
+    }
+
+    /** Asks the antenna to reset and, if it accepted, marks the local fallout. Does not wait for the restart. */
+    private suspend fun reset(): ResetResult {
+        val deviceId = antenna.state.value.deviceId?.takeIf { antenna.state.value.ready }
+        val result = antenna.factoryReset()
+        if (result == ResetResult.DONE && deviceId != null) afterAntennaReset(deviceId)
+        return result
+    }
+
+    private suspend fun afterAntennaReset(deviceId: String) = contactMutex.withLock {
+        val effects = refMutex.withLock {
+            AntennaReset.effects(db.contacts().all(), db.messages().openOutgoing(), db.messages().localQueue(), deviceId, currentSession)
+        }
+        effects.contacts.forEach { db.contacts().update(it) }
+        effects.messages.forEach { db.messages().update(it) }
+        addRepairNotice(effects.contacts.size)
+    }
+
+    private suspend fun addRepairNotice(n: Int) {
+        if (n == 0) return
+        val before = settings.get(Settings.REPAIR_NOTICE)?.toIntOrNull() ?: 0
+        settings.put(Settings.REPAIR_NOTICE, (before + n).toString())
+    }
+
+    /**
      * "Alle Daten löschen". With the antenna connected it is erased too, with the authenticated factory
      * reset (link spec 6.11): contacts, keys and identity on the antenna go, and the app sets it up again
      * for this phone. The local data is only deleted when the antenna confirmed, so a refused reset does
@@ -275,7 +314,7 @@ class Messaging(
      * is cleared. Settings stay.
      */
     suspend fun deleteAll(): ResetResult {
-        val result = if (antenna.state.value.ready) antenna.factoryReset() else ResetResult.NOT_CONNECTED
+        val result = if (antenna.state.value.ready) reset() else ResetResult.NOT_CONNECTED
         if (result == ResetResult.DONE || result == ResetResult.NOT_CONNECTED) {
             db.maintenance().clearAll()
             settings.remove(Settings.REPAIR_NOTICE)
@@ -360,11 +399,10 @@ class Messaging(
             offset += list.size
             if (list.isEmpty() || offset >= (page.int("total") ?: 0)) break
         }
-        val gone = db.contacts().all().filter { it.deviceId == deviceId && it.publicKey !in seen && it.deviceContactId != NO_SLOT }
-        gone.forEach { db.contacts().update(it.copy(state = UNPAIRED, deviceContactId = NO_SLOT)) }
-        if (gone.isNotEmpty()) {
-            val before = settings.get(Settings.REPAIR_NOTICE)?.toIntOrNull() ?: 0
-            settings.put(Settings.REPAIR_NOTICE, (before + gone.size).toString())
+        contactMutex.withLock {
+            val gone = db.contacts().all().filter { it.deviceId == deviceId && it.publicKey !in seen && it.deviceContactId != NO_SLOT }
+            gone.forEach { db.contacts().update(with(AntennaReset) { it.unpaired() }) }
+            addRepairNotice(gone.size)
         }
     }
 
