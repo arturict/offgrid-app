@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,12 +47,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import ch.offgrid.android.domain.Formats
 import ch.offgrid.android.domain.Geo
+import ch.offgrid.android.domain.Heading
 import ch.offgrid.android.domain.LocationError
 import ch.offgrid.android.ui.LocalApp
 import ch.offgrid.android.ui.back
-import ch.offgrid.android.ui.components.BearingDial
 import ch.offgrid.android.ui.components.ButtonVariant
 import ch.offgrid.android.ui.components.CardDivider
+import ch.offgrid.android.ui.components.CompassDial
+import ch.offgrid.android.ui.components.CompassState
 import ch.offgrid.android.ui.components.Footer
 import ch.offgrid.android.ui.components.InfoRow
 import ch.offgrid.android.ui.components.OgButton
@@ -59,6 +63,10 @@ import ch.offgrid.android.ui.components.OgIcon
 import ch.offgrid.android.ui.components.OgIconButton
 import ch.offgrid.android.ui.components.OgNote
 import ch.offgrid.android.ui.components.OgTopBar
+import ch.offgrid.android.ui.components.rememberBearingAngle
+import ch.offgrid.android.ui.components.rememberCompass
+import ch.offgrid.android.ui.components.rememberCompassAngle
+import ch.offgrid.android.ui.components.rememberStickySector
 import ch.offgrid.android.ui.theme.Grotesk
 import ch.offgrid.android.ui.theme.Mono
 import ch.offgrid.android.ui.theme.Og
@@ -66,7 +74,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** Screen 11 "Standort ansehen": compass to a received position (or my own, without the dial). */
+/**
+ * Screen 11 "Standort ansehen". For a received position the arrow points at it in the real world
+ * (bearing minus the phone's heading) while the rose turns so its N points north; for my own position
+ * the arrow on a north-up rose shows where the phone faces. Without a compass only the words remain.
+ */
 @Composable
 fun LocationScreen(nav: NavHostController, contactId: Long, messageId: Long) {
     val app = LocalApp.current
@@ -78,6 +90,8 @@ fun LocationScreen(nav: NavHostController, contactId: Long, messageId: Long) {
     val locating by app.location.locating.collectAsStateWithLifecycle()
     val locationError by app.location.error.collectAsStateWithLifecycle()
     val now = rememberNow()
+    // Declination needs only a rough position, so any fix will do, however old.
+    val compass = rememberCompass(myFix)
     var copied by remember { mutableStateOf(false) }
     var mapsError by rememberSaveable { mutableStateOf(false) }
     // Locate once per visit; a rotation must not ask for the permission again.
@@ -123,30 +137,11 @@ fun LocationScreen(nav: NavHostController, contactId: Long, messageId: Long) {
         OgTopBar(if (out) "Mein Standort" else "Standort von ${c.displayName}", onBack = { nav.back() }, backLabel = "Zurück zum Chat")
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             if (!out) {
-                Column(
-                    Modifier.fillMaxWidth().padding(start = 24.dp, top = 12.dp, end = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    val degrees = bearing?.roundToInt()?.mod(360)
-                    BearingDial(bearing, if (bearing != null) "Richtung ${Geo.compassName(bearing)}, $degrees Grad" else "Richtung unbekannt")
-                    Text(
-                        fix?.let { Geo.formatDistance(Geo.distanceMeters(it.latitude, it.longitude, lat, lon)) } ?: "–",
-                        style = TextStyle(
-                            fontFamily = Grotesk, fontSize = 40.sp, lineHeight = 1.1.em, fontWeight = FontWeight(800),
-                            letterSpacing = (-0.03).em, color = Og.text,
-                        ),
-                    )
-                    Text(
-                        if (bearing != null) "Richtung ${Geo.compassName(bearing)} · $degrees°" else "Eigener Standort fehlt",
-                        style = TextStyle(fontFamily = Grotesk, fontSize = 15.sp, color = Og.text2),
-                    )
-                    Text(
-                        "Norden ist oben. Richte das Handy nach Norden aus.",
-                        style = TextStyle(fontFamily = Grotesk, fontSize = 13.sp, color = Og.text3, textAlign = TextAlign.Center),
-                    )
-                }
+                TargetCompass(compass, bearing, fix?.let { Geo.formatDistance(Geo.distanceMeters(it.latitude, it.longitude, lat, lon)) })
+            } else if (compass.available) {
+                OwnHeading(compass)
             }
+            if (compass.available && compass.unreliable) OgNote("Kompass ungenau – Handy in einer Acht bewegen.")
             Spacer(Modifier.height(20.dp))
             OgCard {
                 Row(
@@ -216,6 +211,81 @@ fun LocationScreen(nav: NavHostController, contactId: Long, messageId: Long) {
         }
     }
 }
+
+/** Dial, distance and direction to a received position. */
+@Composable
+private fun TargetCompass(compass: CompassState, bearing: Double?, distance: String?) {
+    CompassColumn {
+        val degrees = bearing?.roundToInt()?.mod(360)
+        val direction = bearing?.let { "Richtung ${Geo.compassName(it)}" }
+        if (compass.available) {
+            val heading = rememberCompassAngle { compass.heading }
+            val target by rememberBearingAngle(bearing)
+            val ready by remember { derivedStateOf { compass.heading != null } }
+            // Spoken as one of eight directions relative to the phone, so TalkBack is not fed every degree.
+            val relative = rememberStickySector(bearing) { compass.heading?.let { h -> bearing?.let { Heading.relative(it, h) } } }
+            CompassDial(
+                label = when {
+                    bearing == null -> "Richtung unbekannt"
+                    relative == null -> "$direction, $degrees Grad"
+                    else -> "Standort ${Heading.relativeName(relative)}, $direction, $degrees Grad"
+                },
+                roseTurn = { -heading.value },
+                arrowTurn = if (bearing != null && ready) ({ target - heading.value }) else null,
+                unknown = bearing == null,
+            )
+        }
+        Text(
+            distance ?: "–",
+            style = TextStyle(
+                fontFamily = Grotesk, fontSize = 40.sp, lineHeight = 1.1.em, fontWeight = FontWeight(800),
+                letterSpacing = (-0.03).em, color = Og.text,
+            ),
+        )
+        Text(
+            if (bearing != null) "$direction · $degrees°" else "Eigener Standort fehlt",
+            style = TextStyle(fontFamily = Grotesk, fontSize = 15.sp, color = Og.text2),
+        )
+        CompassHint(
+            if (compass.available) "Halte das Handy flach. Der Pfeil zeigt zum Standort."
+            else "Dein Handy hat keinen Kompass. Die Richtung gilt ab Norden.",
+        )
+    }
+}
+
+/** My own position: a north-up dial whose arrow shows where the phone faces. */
+@Composable
+private fun OwnHeading(compass: CompassState) {
+    CompassColumn {
+        val heading = rememberCompassAngle { compass.heading }
+        val degrees by remember { derivedStateOf { compass.heading?.roundToInt()?.mod(360) } }
+        val sector = rememberStickySector(Unit) { compass.heading }
+        CompassDial(
+            label = sector?.let { "Du schaust nach ${Geo.compassName(it * 45.0)}" } ?: "Kompass wird gelesen",
+            roseTurn = { 0f },
+            arrowTurn = if (degrees != null) ({ heading.value }) else null,
+        )
+        Text(
+            degrees?.let { "Du schaust nach ${Geo.compassName(it.toDouble())} · $it°" } ?: "Kompass wird gelesen …",
+            style = TextStyle(fontFamily = Grotesk, fontSize = 15.sp, color = Og.text2),
+        )
+        CompassHint("Norden ist oben. Der Pfeil zeigt, wohin dein Handy schaut.")
+    }
+}
+
+@Composable
+private fun CompassColumn(content: @Composable ColumnScope.() -> Unit) = Column(
+    Modifier.fillMaxWidth().padding(start = 24.dp, top = 12.dp, end = 24.dp),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+    content = content,
+)
+
+@Composable
+private fun CompassHint(text: String) = Text(
+    text,
+    style = TextStyle(fontFamily = Grotesk, fontSize = 13.sp, color = Og.text3, textAlign = TextAlign.Center),
+)
 
 private fun copyCoordinates(context: Context, lat: Double, lon: Double) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
