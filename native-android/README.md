@@ -7,6 +7,13 @@ contacts, messages and settings.
 
 This is a standalone experiment next to the team app in `OffGridCH/app`. It has no remote.
 
+> **Status 2026-10-24 (version 0.3.2):** this app is the submitted OffGrid app for Zentral Hack 2026;
+> see the [root README](../README.md). Parts of this file were written during the night before the
+> team firmware sent over real LoRa. Since then the firmware (`OffGridCH/firmware` 0.3.0) sends,
+> relays and acknowledges over the radio, and groups use the firmware group API from
+> `OffGridCH/firmware#16` (built, not tested on boards). Sections below that say the firmware has
+> no radio or that groups work only in the simulator describe that earlier state.
+
 - Package `ch.offgrid.android`, minSdk 26, target/compile SDK 35, version 0.1.0-lab3 (versionCode 2),
   written against the lab firmware image 0.2.0-lab.3 and the team stack `feature/mesh-direct`
 - Specs followed: `OffGridCH/firmware/docs/offgrid-link.md` (link), `offgrid-protocol.md`
