@@ -22,6 +22,8 @@ Challenge «Bring your own challenge» von Suva, Kategorie Young Talents. Stand 
 | Team-Repository der App | https://github.com/OffGridCH/app |
 | Dieses Repository (App) | https://github.com/arturict/offgrid-app |
 
+Der kurze Abgabetext für den Zentral Hack steht in [ABGABE.md](ABGABE.md).
+
 ## Problem
 
 Wer allein im Funkloch arbeitet, erreicht im Notfall niemanden. Unser Beispiel für die
@@ -118,7 +120,8 @@ Ein erster Entwurf. Preise und Zahlungsbereitschaft haben wir noch mit niemandem
 
 | Angebot | Idee |
 |---|---|
-| Hardware-Kit | Die Antenne zum Einstecken, die App gratis dazu |
+| Produkt verkaufen | Die Antenne als Kit zum Einstecken, die App gratis dazu |
+| OffGrid-Standard lizenzieren | Das Funkprotokoll («Offgrid Protocol v1») mit der Firmware als Referenz für Geräte und Produkte anderer Firmen. Das Lizenzmodell ist noch nicht festgelegt |
 | Nodes für Vereine und Hütten | Wer einen Node aufstellt, erweitert die Abdeckung für alle in der Umgebung. Als Bausatz oder fertig montiert |
 | Betriebe | Geräte, Einrichtung und Betreuung lokaler Nodes, zum Beispiel für ein Forstteam |
 
