@@ -1,5 +1,10 @@
 package ch.offgrid.android.ui.components
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -45,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -69,25 +75,34 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import ch.offgrid.android.data.MessageStatus
+import ch.offgrid.android.domain.LinkDetector
 import ch.offgrid.android.ui.theme.Grotesk
 import ch.offgrid.android.ui.theme.Mono
 import ch.offgrid.android.ui.theme.Og
@@ -192,16 +207,48 @@ private fun outForeground(status: Int): Color {
     return animateColorAsState(if (outlined) Og.text else Og.onAccent, tween(250), label = "fg").value
 }
 
-/** Long press with haptic feedback and a TalkBack action of the same name. */
+/**
+ * Long press with haptic feedback and a TalkBack action of the same name. [onTap] gets the tap
+ * position in this element's coordinates; it shares the detector with the long press so a link
+ * under the finger cannot open after the details sheet did.
+ */
 @Composable
-private fun Modifier.longPressAction(label: String, action: () -> Unit): Modifier {
+private fun Modifier.longPressAction(label: String, onTap: ((Offset) -> Unit)? = null, action: () -> Unit): Modifier {
     val haptics = LocalHapticFeedback.current
-    return pointerInput(action) {
-        detectTapGestures(onLongPress = {
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            action()
-        })
+    return pointerInput(action, onTap) {
+        detectTapGestures(
+            onTap = onTap,
+            onLongPress = {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                action()
+            },
+        )
     }.semantics { onLongClick(label) { action(); true } }
+}
+
+/** Underlined links in [text]; [color] is the bubble's own text colour on the solid accent fill. */
+private fun linkedText(text: String, links: List<LinkDetector.Link>, color: Color): AnnotatedString =
+    buildAnnotatedString {
+        append(text)
+        for (l in links) addStyle(SpanStyle(color = color, textDecoration = TextDecoration.Underline), l.start, l.end)
+    }
+
+/** Opens [url] in the browser or mail app. Nothing is loaded or reported beforehand. */
+private fun openLink(context: Context, url: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "Keine App zum Öffnen gefunden", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private val BUBBLE_PAD_X = 14.dp
+private val BUBBLE_PAD_Y = 10.dp
+
+/** TalkBack action name for a link, so links are reachable from the actions menu. */
+private fun linkActionLabel(link: LinkDetector.Link, text: String): String {
+    val shown = text.substring(link.start, link.end)
+    return if (link.kind == LinkDetector.Kind.EMAIL) "E-Mail schreiben: $shown" else "Link öffnen: $shown"
 }
 
 /**
@@ -236,15 +283,45 @@ fun MessageBubble(
                 )
             }
             val shape = bubbleShape(out, continued)
+            val context = LocalContext.current
+            val density = LocalDensity.current
+            val links = remember(text) { LinkDetector.find(text) }
+            var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+            // Position -> link: tap coordinates are relative to the bubble, the text sits inside its padding.
+            val onTap: (Offset) -> Unit = { pos ->
+                val l = layout
+                if (l != null) {
+                    val p = pos - Offset(with(density) { BUBBLE_PAD_X.toPx() }, with(density) { BUBBLE_PAD_Y.toPx() })
+                    val hit = if (p.x < 0f || p.y < 0f || p.x > l.size.width || p.y > l.size.height) null else {
+                        val i = l.getOffsetForPosition(p)
+                        // The end of a short last line maps to its final character: demand a real hit.
+                        val box = l.getBoundingBox(minOf(i, text.length - 1)).inflate(with(density) { 6.dp.toPx() })
+                        links.firstOrNull { i >= it.start && i < it.end && box.contains(p) }
+                    }
+                    if (hit != null) openLink(context, hit.url)
+                }
+            }
             Box(
                 Modifier
                     .then(if (out) Modifier.outBubble(status, shape) else Modifier.clip(shape).background(Og.surface).border(1.dp, Og.border, shape))
-                    .then(if (onLongPress != null) Modifier.longPressAction(longPressLabel, onLongPress) else Modifier)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .then(
+                        when {
+                            onLongPress != null -> Modifier.longPressAction(longPressLabel, onTap = if (links.isEmpty()) null else onTap, action = onLongPress)
+                            links.isNotEmpty() -> Modifier.pointerInput(onTap) { detectTapGestures(onTap = onTap) }
+                            else -> Modifier
+                        },
+                    )
+                    .padding(horizontal = BUBBLE_PAD_X, vertical = BUBBLE_PAD_Y),
             ) {
                 Text(
-                    text,
+                    linkedText(text, links, if (out) outForeground(status) else Og.accent),
                     style = OgType.body.copy(color = if (out) outForeground(status) else Og.text, fontWeight = FontWeight(if (out) 500 else 400)),
+                    onTextLayout = { layout = it },
+                    modifier = if (links.isEmpty()) Modifier else Modifier.semantics {
+                        customActions = links.map { l ->
+                            CustomAccessibilityAction(linkActionLabel(l, text)) { openLink(context, l.url); true }
+                        }
+                    },
                 )
             }
             AnimatedVisibility(reaction != null) {
