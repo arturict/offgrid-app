@@ -32,8 +32,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // 3: database version 3 (delivery details), Nils' 0.3.0 contract and the lab.3 settings.
-        versionCode = 4
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.3.1"
 
         // PostHog project key from the untracked local.properties (`POSTHOG_KEY=phc_...`). Empty means
         // analytics is a no-op, which is the default for every checkout.
