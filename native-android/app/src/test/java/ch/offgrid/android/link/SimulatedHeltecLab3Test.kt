@@ -201,6 +201,26 @@ class SimulatedHeltecLab3Test {
     }
 
     @Test
+    fun factoryResetWorksOnALockedAntennaAndGivesItANewIdentity() = runBlocking {
+        val c = connect().provisioned()
+        c.pair("Anna")
+        val before = c.call("id.get").str("node_id")
+        c.call("sec.lock")
+        assertEquals("E_LOCKED", c.errorOf("id.get"))
+        val erase = buildJsonObject {
+            put("confirm", "ERASE"); put("method", "app")
+            wrapArgs(c.call("sys.hello", hello), WrapPurpose.RESET).forEach { (k, v) -> put(k, v) }
+        }
+        assertEquals(true, c.call("sys.factory_reset", erase).bool("pending"))
+        withTimeout(5_000) { while (true) { val e = c.events.receive(); if (e.name == "sys.boot") break } }
+        val h = c.call("sys.hello", hello)
+        assertEquals("unprovisioned", h.str("state"))
+        c.call("sec.provision", wrapArgs(h))
+        assertNotEquals(before, c.call("id.get").str("node_id"))
+        c.close()
+    }
+
+    @Test
     fun ogz1AcceptsLongerTextWhenItCompresses() = runBlocking {
         val c = connect().provisioned()
         val slot = c.pair("Anna")

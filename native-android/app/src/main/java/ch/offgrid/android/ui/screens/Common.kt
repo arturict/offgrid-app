@@ -121,13 +121,20 @@ fun AntennaActivity.text(): String = when (this) {
     AntennaActivity.RESETTING -> "Wird zurückgesetzt"
 }
 
-/** Why "Alle Daten löschen" stopped; null when it went through. */
+/** Why the antenna reset ("Alle Daten löschen", "Antenne zurücksetzen") stopped or needs a note; null when it went through. */
 fun ResetResult.text(): String? = when (this) {
     ResetResult.DONE, ResetResult.NOT_CONNECTED -> null
+    ResetResult.DONE_NOT_RECONNECTED ->
+        "Die Antenne hat das Zurücksetzen angenommen, meldet sich aber noch nicht wieder. Warte kurz oder steck sie neu ein und tippe auf „Neu verbinden“. " +
+            "Ihre Kontakte müssen neu gekoppelt werden; deine Chats sind noch da."
     ResetResult.WRONG_PHONE -> "Die Antenne gehört zu einem anderen Handy und wurde nicht zurückgesetzt. Auf diesem Handy wurde nichts gelöscht."
     ResetResult.RATE_LIMITED -> "Zu viele fehlgeschlagene Versuche. Die Antenne wartet bis zu einer Minute. Versuch es dann erneut. Es wurde nichts gelöscht."
-    ResetResult.UNSUPPORTED -> "Diese Antennen-Firmware lässt sich nur mit dem Knopf zurücksetzen. Es wurde nichts gelöscht."
-    ResetResult.FAILED -> "Die Antenne konnte nicht zurückgesetzt werden. Es wurde nichts gelöscht."
+    ResetResult.UNSUPPORTED ->
+        "Diese Antennen-Firmware kennt das Zurücksetzen per App nicht. Einen Knopf dafür gibt es nicht; spiel eine aktuelle Firmware auf. Es wurde nichts gelöscht."
+    ResetResult.FAILED -> "Die Antenne konnte nicht zurückgesetzt werden. Versuch es erneut. Es wurde nichts gelöscht."
+    ResetResult.UNKNOWN ->
+        "Die Verbindung zur Antenne brach während des Zurücksetzens ab. Ob die Antenne zurückgesetzt wurde, ist unklar. " +
+            "Steck sie neu ein und verbinde sie neu. Auf diesem Handy wurde nichts gelöscht oder geändert."
 }
 
 fun PairingError.text(): String = when (this) {

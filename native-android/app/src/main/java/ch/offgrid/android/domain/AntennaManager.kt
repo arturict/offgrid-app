@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -149,8 +150,35 @@ data class AntennaState(
     val busy: Boolean get() = phase == AntennaPhase.SEARCHING || phase == AntennaPhase.DEVICE_FOUND || phase == AntennaPhase.CONNECTING
 }
 
-/** Outcome of [AntennaManager.factoryReset]. */
-enum class ResetResult { DONE, NOT_CONNECTED, WRONG_PHONE, RATE_LIMITED, UNSUPPORTED, FAILED }
+/**
+ * Outcome of [AntennaManager.factoryReset] and [Messaging.resetAntenna]. Everything except [DONE],
+ * [DONE_NOT_RECONNECTED] and [NOT_CONNECTED] leaves the phone's data untouched.
+ */
+enum class ResetResult {
+    /** The antenna accepted, restarted and was set up again (from [Messaging.resetAntenna]; the manager answers DONE on acceptance). */
+    DONE,
+
+    /** The antenna accepted the reset, but did not report back ready within the wait; it finishes on its own. */
+    DONE_NOT_RECONNECTED,
+
+    /** No antenna session to reset (`deleteAll` then only clears the phone). */
+    NOT_CONNECTED,
+
+    /** `E_UNLOCK_FAILED`: the antenna's vault does not open with this phone's token (or the old phone's from a backup). */
+    WRONG_PHONE,
+
+    /** `E_RATE_LIMITED`: the antenna's authentication backoff is running. */
+    RATE_LIMITED,
+
+    /** `E_UNKNOWN_CMD`: the firmware has no `sys.factory_reset`. */
+    UNSUPPORTED,
+
+    /** Any other refusal (`E_INTERNAL`, `E_NO_SESSION`, `E_LOCKED`, …) or no answer to `sys.hello`; the reset did not start. */
+    FAILED,
+
+    /** The link broke or timed out after the reset command was sent: the antenna may or may not have erased itself. */
+    UNKNOWN,
+}
 
 /** Receives device events and the "ready" signal; implemented by [Messaging]. */
 interface AntennaListener {
@@ -615,6 +643,8 @@ class AntennaManager(
         val tokens = listOfNotNull(tokenSource.token(deviceBytes), transferTokenFor(deviceId))
         val boot = CompletableDeferred<Unit>()
         resetBoot = boot
+        // From the moment the command is on the wire, a lost link no longer proves that nothing happened.
+        var sent = false
         try {
             for (token in tokens) {
                 val args = buildJsonObject {
@@ -624,14 +654,16 @@ class AntennaManager(
                         .forEach { (k, v) -> put(k, v) }
                 }
                 try {
+                    sent = true
                     authCall(c, "sys.factory_reset", args)
                 } catch (e: LinkCommandException) {
+                    sent = false
                     log("factory reset refused: ${e.error.code}")
                     when (e.error.code) {
                         "E_UNLOCK_FAILED" -> continue
                         "E_RATE_LIMITED" -> return ResetResult.RATE_LIMITED.also { resetBoot = null }
-                        // Older images confirm the reset with the button instead (E_BUSY) or do not know it.
-                        "E_BUSY", "E_UNKNOWN_CMD" -> return ResetResult.UNSUPPORTED.also { resetBoot = null }
+                        // Nils' firmware has no button reset (link spec 11); an image without the command is older.
+                        "E_UNKNOWN_CMD" -> return ResetResult.UNSUPPORTED.also { resetBoot = null }
                         else -> return ResetResult.FAILED.also { resetBoot = null }
                     }
                 }
@@ -646,11 +678,23 @@ class AntennaManager(
             return ResetResult.WRONG_PHONE
         } catch (_: LinkTimeoutException) {
             resetBoot = null
-            return ResetResult.FAILED
+            return if (sent) ResetResult.UNKNOWN else ResetResult.FAILED
         } catch (_: LinkClosedException) {
             resetBoot = null
-            return ResetResult.NOT_CONNECTED
+            return if (sent) ResetResult.UNKNOWN else ResetResult.NOT_CONNECTED
         }
+    }
+
+    /**
+     * After [factoryReset] answered DONE: waits until the antenna restarted and is set up again for this phone.
+     * False when the session ended in an error or nothing happened within [SETUP_AFTER_RESET_TIMEOUT_MS]; the
+     * antenna has accepted the reset then and finishes it on its own (link spec 11, the journal resumes it).
+     */
+    suspend fun awaitSetUp(): Boolean {
+        val end = withTimeoutOrNull(SETUP_AFTER_RESET_TIMEOUT_MS) {
+            state.first { it.phase == AntennaPhase.READY || it.phase == AntennaPhase.ERROR || it.phase == AntennaPhase.DISCONNECTED }
+        }
+        return end?.phase == AntennaPhase.READY
     }
 
     /** Waits for the restart after a reset (`sys.boot`), then provisions the empty antenna again. */
@@ -742,6 +786,9 @@ class AntennaManager(
         private const val PING_TIMEOUT_MS = 2_000L
         private const val MAX_MISSED_PINGS = 3
         private const val RESET_BOOT_TIMEOUT_MS = 15_000L
+
+        // sys.boot wait, up to 8 s of sys.hello retries, then sec.provision and the first reads.
+        private const val SETUP_AFTER_RESET_TIMEOUT_MS = 40_000L
         private val HELLO_ARGS = buildJsonObject { put("app", "offgrid-android"); put("app_proto", "1.0") }
         private val RETRY_WITH_NEW_HELLO = setOf("E_NO_SESSION", "E_NOT_PROVISIONED", "E_ALREADY_PROVISIONED")
         private val LOCKED_CODES = setOf("E_LOCKED", "E_NOT_PROVISIONED")
