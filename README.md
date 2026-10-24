@@ -54,6 +54,7 @@ Handy A ──USB-C── Antenne A ~~~ LoRa 868 MHz ~~~ [Node] ~~~ Antenne B �
 | Antenne | Heltec WiFi LoRa 32 V3 (ESP32-S3 und SX1262), rohes LoRa auf 868 MHz, am Handy über USB-C. App und Antenne sprechen JSON Lines über die serielle Schnittstelle («Host Interface v1»). |
 | Kopplung | Beide Handys scannen gegenseitig den QR-Code des anderen (X25519-Schlüsseltausch). Die App führt Schritt für Schritt durch die Kopplung. |
 | Verschlüsselung | Nachrichten sind von Antenne zu Antenne mit AES-128-CCM verschlüsselt. Die Schlüssel bleiben auf der Antenne, das Handy entsperrt sie mit einem Token. Zwischen Handy und Antenne läuft der Text unverschlüsselt über das USB-Kabel. |
+| Secure Vault | Identität und Kontaktschlüssel liegen AES-256-GCM-verschlüsselt im Flash der Antenne (`src/storage/VaultStore` in der Firmware). Entsperrt wird der Tresor nur mit dem Token des gekoppelten Handys, dessen Schlüssel im Android Keystore liegt und die App nie im Klartext sieht. Eine verlorene Antenne allein gibt keine Schlüssel preis. |
 | Weiterleiten | Ein Node (eine Antenne ohne Handy) leitet Pakete weiter, höchstens 3 Hops, mit Erkennung doppelter Pakete. |
 | Quittung | Der Empfänger schickt eine Empfangsbestätigung (ACK) zurück. Bleibt sie aus, sendet die Antenne erneut. |
 | Status in der App | «wartet auf Funk» → «gesendet» → «zugestellt» |
