@@ -37,6 +37,7 @@ OffGrid ergänzt die Alarmierung, ersetzt aber keinen Notruf. Wer Empfang hat, a
 
 ## Zielgruppe
 
+- Wandernde und Bergsportler, die in den Bergen keinen Empfang haben
 - Menschen, die allein im Gelände arbeiten: Forst, Alp, Unterhalt im Gebirge (der Suva-Fall)
 - Helferinnen und Helfer vor Ort, wenn bei einem Unwetter oder Stromausfall Netze ausfallen
 - Leute in Berg und Hütte, die hinter dem Grat kein Netz mehr haben
