@@ -7,15 +7,24 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -24,11 +33,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -49,7 +62,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -69,131 +81,316 @@ import ch.offgrid.android.ui.Routes
 import ch.offgrid.android.ui.back
 import ch.offgrid.android.ui.components.AvatarVariant
 import ch.offgrid.android.ui.components.ButtonVariant
+import ch.offgrid.android.ui.components.CountdownPill
+import ch.offgrid.android.ui.components.Footer
+import ch.offgrid.android.ui.components.MutualScanIllustration
 import ch.offgrid.android.ui.components.OgAvatar
 import ch.offgrid.android.ui.components.OgButton
 import ch.offgrid.android.ui.components.OgCard
+import ch.offgrid.android.ui.components.OgIcon
+import ch.offgrid.android.ui.components.OgIconView
 import ch.offgrid.android.ui.components.OgNote
-import ch.offgrid.android.ui.components.OgSegmented
 import ch.offgrid.android.ui.components.OgTextField
 import ch.offgrid.android.ui.components.OgTopBar
 import ch.offgrid.android.ui.components.QrCard
 import ch.offgrid.android.ui.components.QrScanner
+import ch.offgrid.android.ui.components.Step
 import ch.offgrid.android.ui.components.StepList
+import ch.offgrid.android.ui.components.StepState
+import ch.offgrid.android.ui.components.WizardProgress
+import ch.offgrid.android.ui.theme.LocalReducedMotion
 import ch.offgrid.android.ui.theme.Og
 import ch.offgrid.android.ui.theme.OgType
 import kotlinx.coroutines.launch
 
-/** Spec error `scanner-unavailable`. */
-private const val SCANNER_UNAVAILABLE = "Der QR-Scanner ist auf diesem Handy nicht verfügbar."
-
-/** No spec text exists for a denied camera; worded like the spec's `location-denied`. */
-private const val CAMERA_DENIED = "Kamerazugriff fehlt. Erlaube ihn in den Android-Einstellungen."
-
 /** Texts under the QR code and the scanner: 16 px, line height 1.45, `--og-text-2` (`Handshake.dc.html`). */
 private val IntroStyle = OgType.body2.copy(fontSize = 16.sp, lineHeight = 1.45.em, textAlign = TextAlign.Center)
 
-private enum class CameraProblem { NO_CAMERA, DENIED }
-
-/** Screen 4 "Kontakt hinzufügen": show my code, scan the other one (mutual QR, link spec 7.4). */
+/** Screen 4 "Kontakt hinzufügen" as a guided mutual QR scan; the logic is in [PairingWizard]. */
 @Composable
 fun AddContactScreen(nav: NavHostController, scanTab: Boolean) {
     val app = LocalApp.current
-    val vm = viewModel { AddContactViewModel(app.pairing, app.antenna.state) }
-    val ui by vm.ui.collectAsStateWithLifecycle()
-    val linkKind by app.linkKind.collectAsStateWithLifecycle()
-    var tab by rememberSaveable { mutableStateOf(if (scanTab) "scan" else "mine") }
-
-    LaunchedEffect(ui.confirmedContactId) {
-        val id = ui.confirmedContactId ?: return@LaunchedEffect
-        vm.finish()
-        nav.navigate(Routes.added(id)) { popUpTo(Routes.ADD) { inclusive = true } }
+    val vm = viewModel {
+        // App scope: removing a half-paired contact must finish after the screen is gone.
+        AddContactViewModel(app.pairing, app.antenna.state, { id -> app.scope.launch { app.messaging.deleteContact(id) } }, scanTab)
     }
+    val wizard = vm.wizard
+    val ui by wizard.ui.collectAsStateWithLifecycle()
+    val linkKind by app.linkKind.collectAsStateWithLifecycle()
+    var confirmCancel by rememberSaveable { mutableStateOf(false) }
+    val reduced = LocalReducedMotion.current
+
+    val step = ui.step
+    LaunchedEffect(step) {
+        if (step is WizardStep.Success) nav.navigate(Routes.added(step.contactId)) { popUpTo(Routes.ADD) { inclusive = true } }
+    }
+    val close = {
+        confirmCancel = false
+        wizard.cancel()
+        nav.back()
+    }
+    val requestClose = { if (ui.cancelNeedsConfirm) confirmCancel = true else close() }
+    BackHandler(onBack = requestClose)
 
     Page {
-        OgTopBar("Kontakt hinzufügen", onBack = { nav.back() }, backLabel = "Zurück zu den Kontakten")
-        OgSegmented(listOf("mine" to "Mein Code", "scan" to "Code scannen"), tab, label = "Art des Hinzufügens") {
-            tab = it
-            vm.clearError()
-        }
+        OgTopBar("Kontakt hinzufügen", onBack = requestClose, backLabel = "Kopplung abbrechen")
+        WizardProgress(
+            // Expired is not "finished": no bar is filled.
+            if (step == WizardStep.Expired) 0 else ui.stepNumber, WIZARD_STEPS, title = stepTitle(step),
+            label = if (step == WizardStep.Expired) "Zeit abgelaufen" else null,
+        )
         BoxWithConstraints(Modifier.weight(1f)) {
             // At least as tall as the viewport, so the hint sits at the bottom like in the design and
             // scrolls with the rest when large font sizes make the page longer than the screen.
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).heightIn(min = maxHeight)) {
-                if (tab == "mine") {
-                    MyCodeTab(ui)
-                } else {
-                    ScanTab(ui, simulated = linkKind == LinkKind.SIMULATED, onStart = vm::clearError, onCode = vm::scan)
+                AnimatedContent(
+                    targetState = step,
+                    transitionSpec = {
+                        if (reduced) {
+                            EnterTransition.None togetherWith ExitTransition.None
+                        } else {
+                            (fadeIn(tween(220, delayMillis = 60)) + slideInHorizontally(tween(260)) { it / 12 }) togetherWith fadeOut(tween(120))
+                        }
+                    },
+                    label = "wizardStep",
+                ) { shown ->
+                    Column(Modifier.fillMaxWidth()) {
+                        when (shown) {
+                            WizardStep.Intro -> IntroStep()
+                            is WizardStep.Half -> if (shown.role == PairRole.SHOW) {
+                                ShowStep(ui, shown.second)
+                            } else {
+                                ScanStep(ui, simulated = linkKind == LinkKind.SIMULATED, wizard)
+                            }
+                            WizardStep.Confirming -> ConfirmingStep(ui)
+                            WizardStep.Expired -> ExpiredStep()
+                            is WizardStep.Success -> Unit
+                        }
+                    }
                 }
-                ui.error?.let { OgNote(it.text()) }
-                if (ui.canReplace) {
-                    OgButton("Neu koppeln", vm::replace, Modifier.padding(start = 16.dp, top = 10.dp, end = 16.dp),
-                        variant = ButtonVariant.Secondary)
-                }
-                if (ui.codeRenewed && tab == "mine") {
-                    OgNote("Dein Code hat sich erneuert. Hat dein Gegenüber den alten schon gescannt, muss es diesen neu scannen.")
-                }
+                Problem(ui, wizard, onConnect = { nav.navigate(Routes.CONNECT) })
                 Spacer(Modifier.height(16.dp))
                 Spacer(Modifier.weight(1f))
-                if (tab == "mine") {
+                if (step is WizardStep.Half && step.role == PairRole.SHOW) {
                     Text(
                         "Der Code enthält deinen Schlüssel. Zeig ihn nur Personen, mit denen du schreiben willst.",
                         style = OgType.help.copy(lineHeight = 1.45.em, textAlign = TextAlign.Center),
-                        modifier = Modifier.fillMaxWidth().padding(start = 28.dp, end = 28.dp, bottom = 28.dp),
+                        modifier = Modifier.fillMaxWidth().padding(start = 28.dp, end = 28.dp, bottom = 12.dp),
                     )
                 }
             }
         }
+        StepActions(step, wizard)
+    }
+
+    if (confirmCancel) {
+        AlertDialog(
+            onDismissRequest = { confirmCancel = false },
+            containerColor = Og.surface,
+            shape = RoundedCornerShape(Og.rCard),
+            title = { Text("Kopplung abbrechen?", style = OgType.bodyStrong) },
+            text = {
+                Text(
+                    "Ihr müsst danach beide neu beginnen." +
+                        (ui.cancelRemoves?.let { " Der unvollständige Kontakt $it wird wieder entfernt." } ?: ""),
+                    style = OgType.body,
+                )
+            },
+            confirmButton = { TextButton(onClick = close) { Text("Abbrechen", style = OgType.bodyStrong.copy(color = Og.danger)) } },
+            dismissButton = { TextButton(onClick = { confirmCancel = false }) { Text("Weiter koppeln", style = OgType.bodyStrong) } },
+        )
     }
 }
 
+private fun stepTitle(step: WizardStep): String = when (step) {
+    WizardStep.Intro -> "So koppelt ihr eure Handys"
+    is WizardStep.Half -> when {
+        step.role == PairRole.SHOW && !step.second -> "Zeig deinen Code"
+        step.role == PairRole.SCAN && !step.second -> "Scanne den Code deines Gegenübers"
+        step.role == PairRole.SHOW -> "Jetzt zeigst du deinen Code"
+        else -> "Jetzt scannst du den Code deines Gegenübers"
+    }
+    WizardStep.Confirming -> "Fast geschafft"
+    WizardStep.Expired -> "Der Code ist abgelaufen"
+    is WizardStep.Success -> "Gekoppelt"
+}
+
 @Composable
-private fun MyCodeTab(ui: AddContactUi) {
+private fun IntroStep() {
     Column(
         Modifier.fillMaxWidth().padding(start = 24.dp, top = 28.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        MutualScanIllustration()
+        Text(
+            "Ihr scannt euch gegenseitig: zuerst scannt einer, dann der andere.",
+            style = IntroStyle.copy(color = Og.text),
+            modifier = Modifier.widthIn(max = 300.dp),
+        )
+    }
+    StepList(
+        spinner = false,
+        steps = listOf(
+            Step("Einer zeigt seinen Code, der andere scannt", StepState.Todo, meta = "1"),
+            Step("Dann tauscht ihr die Rollen", StepState.Todo, meta = "2"),
+            Step("Die Antennen bestätigen sich per Funk", StepState.Todo, meta = "3"),
+        ),
+    )
+    Text(
+        "Öffnet auf beiden Handys „Kontakt hinzufügen“. Wer anfängt, ist egal; wählt nur verschiedene Rollen.",
+        style = OgType.help.copy(lineHeight = 1.45.em, textAlign = TextAlign.Center),
+        modifier = Modifier.fillMaxWidth().padding(start = 28.dp, top = 16.dp, end = 28.dp),
+    )
+}
+
+@Composable
+private fun ShowStep(ui: WizardUi, second: Boolean) {
+    Column(
+        Modifier.fillMaxWidth().padding(start = 24.dp, top = 22.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        QrCard(ui.qr)
+        ui.secondsLeft?.let { CountdownPill(it) }
+        val peer = ui.peerName
+        Text(
+            if (second && peer != null) {
+                "Jetzt scannt $peer deinen Code. Sobald die Antenne antwortet, geht es von selbst weiter."
+            } else {
+                "Lass dein Gegenüber diesen Code mit der OffGrid-App scannen."
+            },
+            style = IntroStyle,
+            modifier = Modifier.widthIn(max = 300.dp),
+        )
+    }
+    if (ui.codeRenewed) {
+        OgNote("Dein Code hat sich erneuert. ${ui.peerName ?: "Dein Gegenüber"} muss ihn nochmals scannen.")
+    }
+    ui.waiting?.let { StepList(spinner = false, steps = it) }
+}
+
+@Composable
+private fun ConfirmingStep(ui: WizardUi) {
+    Column(
+        Modifier.fillMaxWidth().padding(start = 24.dp, top = 28.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        OgAvatar(null, 96.dp, AvatarVariant.Pending)
+        ui.peerName?.let { Text(it, style = OgType.hero.copy(textAlign = TextAlign.Center)) }
+        Text(
+            "Die Antennen bestätigen sich per Funk. Das dauert meist nur ein paar Sekunden.",
+            style = IntroStyle,
+            modifier = Modifier.widthIn(max = 300.dp),
+        )
+    }
+    ui.waiting?.let { StepList(spinner = false, steps = it) }
+}
+
+@Composable
+private fun ExpiredStep() {
+    Column(
+        Modifier.fillMaxWidth().padding(start = 24.dp, top = 40.dp, end = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        QrCard(ui.qr)
+        Box(
+            Modifier.size(96.dp).clip(CircleShape).background(Og.dangerBg).border(1.dp, Og.dangerBorder, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) { OgIconView(OgIcon.Clock, Og.dangerTitle, size = 40.dp) }
         Text(
-            "Lass dein Gegenüber diesen Code mit der OffGrid-App scannen.",
+            "Ein Code gilt 5 Minuten. Tippt auf beiden Handys auf „Neu starten“ und scannt euch dann nochmals gegenseitig.",
             style = IntroStyle,
-            modifier = Modifier.widthIn(max = 290.dp),
+            modifier = Modifier.widthIn(max = 300.dp),
         )
     }
-    StepList(spinner = false, steps = myCodeSteps(codeReady = ui.qr != null, confirmed = ui.confirmed))
 }
 
+/** The current problem as a note, with the button that solves it where there is one. */
 @Composable
-private fun ScanTab(ui: AddContactUi, simulated: Boolean, onStart: () -> Unit, onCode: (String) -> Unit) {
+private fun Problem(ui: WizardUi, wizard: PairingWizard, onConnect: () -> Unit) {
+    val problem = ui.problem ?: return
+    if (ui.step is WizardStep.Success || ui.step == WizardStep.Expired) return
+    val context = LocalContext.current
+    OgNote(problem.text)
+    val action: Pair<String, () -> Unit>? = when {
+        ui.canReplace -> "Neu koppeln" to wizard::replace
+        problem == WizardProblem.CAMERA_DENIED -> "Android-Einstellungen öffnen" to { context.openAppSettings() }
+        problem == WizardProblem.ANTENNA_DISCONNECTED || problem == WizardProblem.ANTENNA_LOCKED -> "Antenne verbinden" to onConnect
+        else -> null
+    }
+    action?.let { (label, onClick) ->
+        OgButton(label, onClick, Modifier.padding(start = 16.dp, top = 10.dp, end = 16.dp), variant = ButtonVariant.Secondary)
+    }
+}
+
+/** The buttons that move the wizard on; fixed at the bottom. */
+@Composable
+private fun StepActions(step: WizardStep, wizard: PairingWizard) {
+    when (step) {
+        WizardStep.Intro -> Footer {
+            OgButton("Ich zeige meinen Code", { wizard.choose(PairRole.SHOW) }, icon = OgIcon.Qr)
+            OgButton("Ich scanne", { wizard.choose(PairRole.SCAN) }, variant = ButtonVariant.Secondary)
+        }
+        is WizardStep.Half -> when {
+            step.role == PairRole.SHOW && !step.second -> Footer {
+                OgButton("Mein Gegenüber hat gescannt", wizard::peerScanned, icon = OgIcon.Check)
+                OgButton("Lieber zuerst scannen", { wizard.choose(PairRole.SCAN) }, variant = ButtonVariant.Secondary)
+            }
+            step.role == PairRole.SCAN && !step.second -> Footer {
+                OgButton("Lieber zuerst meinen Code zeigen", { wizard.choose(PairRole.SHOW) }, variant = ButtonVariant.Secondary)
+            }
+            step.role == PairRole.SCAN -> Footer {
+                OgButton("Mein Code wurde noch nicht gescannt", wizard::peerNotScannedYet, variant = ButtonVariant.Secondary)
+            }
+            else -> Unit
+        }
+        WizardStep.Confirming -> Footer {
+            OgButton("Meinen Code nochmals zeigen", wizard::showCodeAgain, variant = ButtonVariant.Secondary)
+        }
+        WizardStep.Expired -> Footer {
+            OgButton("Neu starten", wizard::restart, icon = OgIcon.Refresh)
+        }
+        is WizardStep.Success -> Unit
+    }
+}
+
+/** The camera opens as soon as the step is shown; after a result it waits for a tap to scan again. */
+@Composable
+private fun ScanStep(ui: WizardUi, simulated: Boolean, wizard: PairingWizard) {
     val context = LocalContext.current
     var cameraOn by rememberSaveable { mutableStateOf(false) }
-    var problem by rememberSaveable { mutableStateOf<CameraProblem?>(null) }
+    var autoStarted by rememberSaveable { mutableStateOf(false) }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) cameraOn = true else problem = CameraProblem.DENIED
+        if (granted) cameraOn = true else wizard.cameraProblem(CameraProblem.DENIED)
+    }
+    val start = {
+        wizard.clearError()
+        when {
+            !context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) -> wizard.cameraProblem(CameraProblem.NO_CAMERA)
+            context.hasCameraPermission() -> cameraOn = true
+            else -> permission.launch(Manifest.permission.CAMERA)
+        }
+    }
+    LaunchedEffect(Unit) {
+        if (!autoStarted) {
+            autoStarted = true
+            start()
+        }
     }
     // Back from the Android settings with the camera allowed: the hint is no longer true.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        if (problem == CameraProblem.DENIED && context.hasCameraPermission()) problem = null
-    }
-
-    val scannedName = ui.scannedName
-    if (scannedName != null) {
-        Column(
-            Modifier.fillMaxWidth().padding(start = 24.dp, top = 28.dp, end = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            OgAvatar(null, 96.dp, AvatarVariant.Pending)
-            Text(scannedName, style = OgType.hero.copy(textAlign = TextAlign.Center), modifier = Modifier.semantics { heading() })
+        if (ui.problem == WizardProblem.CAMERA_DENIED && context.hasCameraPermission()) {
+            wizard.cameraProblem(null)
+            cameraOn = true
         }
-        StepList(spinner = false, steps = scanSteps(pingSent = ui.pingSent, confirmed = ui.confirmed))
-        return
     }
 
     Column(
-        Modifier.fillMaxWidth().padding(start = 24.dp, top = 28.dp, end = 24.dp),
+        Modifier.fillMaxWidth().padding(start = 24.dp, top = 22.dp, end = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         val shape = RoundedCornerShape(Og.rQr)
         Box(
@@ -204,21 +401,13 @@ private fun ScanTab(ui: AddContactUi, simulated: Boolean, onStart: () -> Unit, o
                     if (cameraOn) {
                         Modifier.semantics { contentDescription = "Kamera läuft" }
                     } else {
-                        Modifier.clickable(role = Role.Button) {
-                            onStart()
-                            problem = null
-                            when {
-                                !context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) -> problem = CameraProblem.NO_CAMERA
-                                context.hasCameraPermission() -> cameraOn = true
-                                else -> permission.launch(Manifest.permission.CAMERA)
-                            }
-                        }.semantics { contentDescription = "Kamera starten und Code scannen" }
+                        Modifier.clickable(role = Role.Button, onClick = start).semantics { contentDescription = "Kamera starten und Code scannen" }
                     },
                 ),
             contentAlignment = Alignment.Center,
         ) {
             if (cameraOn) {
-                QrScanner(onResult = { cameraOn = false; onCode(it) }, modifier = Modifier.fillMaxSize())
+                QrScanner(onResult = { cameraOn = false; wizard.scan(it) }, modifier = Modifier.fillMaxSize())
             } else {
                 Text(
                     "KAMERA STARTEN",
@@ -228,19 +417,10 @@ private fun ScanTab(ui: AddContactUi, simulated: Boolean, onStart: () -> Unit, o
             }
             ScanCorners(Modifier.matchParentSize())
         }
+        ui.secondsLeft?.let { CountdownPill(it) }
         Text("Halte die Kamera auf den Code, den dein Gegenüber anzeigt.", style = IntroStyle, modifier = Modifier.widthIn(max = 290.dp))
     }
-    when (problem) {
-        CameraProblem.NO_CAMERA -> OgNote(SCANNER_UNAVAILABLE)
-        CameraProblem.DENIED -> {
-            OgNote(CAMERA_DENIED)
-            Column(Modifier.padding(start = 16.dp, top = 10.dp, end = 16.dp)) {
-                OgButton("Android-Einstellungen öffnen", { context.openAppSettings() }, variant = ButtonVariant.Secondary)
-            }
-        }
-        null -> Unit
-    }
-    if (BuildConfig.DEBUG) DebugCodeInput(simulated, onCode)
+    if (BuildConfig.DEBUG) DebugCodeInput(simulated, wizard::scan)
 }
 
 /** Debug builds only: paste a QR text (from a chat or the demo menu) or scan a simulated peer. */

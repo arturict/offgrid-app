@@ -28,8 +28,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
@@ -45,11 +43,18 @@ import ch.offgrid.android.ui.components.OgCard
 import ch.offgrid.android.ui.components.OgIcon
 import ch.offgrid.android.ui.components.OgIconView
 import ch.offgrid.android.ui.components.OgTextField
+import ch.offgrid.android.ui.components.WizardProgress
 import ch.offgrid.android.ui.theme.Og
 import ch.offgrid.android.ui.theme.OgType
 import kotlinx.coroutines.launch
 
-/** Screen 5 "Schlüssel ausgetauscht": compare the key pattern and name the contact. */
+/** Sent by "Testnachricht senden": short enough for one packet, and the question lets simulated peers answer. */
+const val PAIRING_TEST_MESSAGE = "Hallo, das ist eine Testnachricht von OffGrid. Kommt sie an?"
+
+/**
+ * Screen 5, the end of the pairing wizard: compare the key pattern, name the contact, send a test message or
+ * finish. Both buttons save the name first.
+ */
 @Composable
 fun ContactAddedScreen(nav: NavHostController, contactId: Long) {
     val app = LocalApp.current
@@ -77,10 +82,18 @@ fun ContactAddedScreen(nav: NavHostController, contactId: Long) {
     val c = contact ?: return
     val nameValid = MessageLimits.isValidName(displayName)
 
+    val save: (after: () -> Unit) -> Unit = { after ->
+        scope.launch {
+            app.messaging.renameContact(c.id, displayName, firstName, lastName)
+            after()
+        }
+    }
+
     Page {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            WizardProgress(null, WIZARD_STEPS, title = "Mit ${c.displayName} gekoppelt", modifier = Modifier.padding(top = 24.dp))
             Column(
-                Modifier.fillMaxWidth().padding(start = 24.dp, top = 56.dp, end = 24.dp),
+                Modifier.fillMaxWidth().padding(start = 24.dp, top = 28.dp, end = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
@@ -95,11 +108,7 @@ fun ContactAddedScreen(nav: NavHostController, contactId: Long) {
                 }
                 // Heading and text form their own group with gap 8 under the 16 below the avatar.
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "Schlüssel ausgetauscht",
-                        style = OgType.hero.copy(textAlign = TextAlign.Center),
-                        modifier = Modifier.semantics { heading() },
-                    )
+                    Text("Schlüssel ausgetauscht", style = OgType.bodyStrong.copy(textAlign = TextAlign.Center))
                     Text(
                         "Vergleicht das Muster auf beiden Handys. Sieht es gleich aus, hat alles geklappt.",
                         style = OgType.body2.copy(textAlign = TextAlign.Center),
@@ -121,18 +130,22 @@ fun ContactAddedScreen(nav: NavHostController, contactId: Long) {
         }
         // The design has no gap above the buttons (`padding: 0 16px 26px`); the flexible space does it.
         Footer(top = 0.dp) {
-            OgButton("Speichern und schreiben", enabled = nameValid, onClick = {
-                scope.launch {
-                    app.messaging.renameContact(c.id, displayName, firstName, lastName)
+            OgButton("Testnachricht senden", icon = OgIcon.Send, enabled = nameValid, onClick = {
+                save {
+                    app.messaging.sendText(c.id, PAIRING_TEST_MESSAGE)
                     nav.navigate(Routes.chat(c.id)) { popUpTo(Routes.CONTACTS) }
                 }
             })
-            OgButton("Muster stimmt nicht überein", variant = ButtonVariant.Secondary, onClick = {
-                scope.launch {
-                    app.messaging.deleteContact(c.id)
-                    nav.navigate(Routes.add()) { popUpTo(Routes.CONTACTS) }
-                }
+            OgButton("Fertig", variant = ButtonVariant.Secondary, enabled = nameValid, onClick = {
+                save { nav.navigate(Routes.CONTACTS) { popUpTo(Routes.CONTACTS) { inclusive = true } } }
             })
+            OgButton("Muster stimmt nicht überein", variant = ButtonVariant.DangerText, fullWidth = false,
+                height = 44.dp, modifier = Modifier.align(Alignment.CenterHorizontally), onClick = {
+                    scope.launch {
+                        app.messaging.deleteContact(c.id)
+                        nav.navigate(Routes.add()) { popUpTo(Routes.CONTACTS) }
+                    }
+                })
         }
     }
 }

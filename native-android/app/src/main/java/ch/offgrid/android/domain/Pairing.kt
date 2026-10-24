@@ -33,6 +33,8 @@ enum class PairingError {
 data class PairingState(
     /** QR text from `pair.begin`; rendered as the QR code. */
     val qr: String? = null,
+    /** When the antenna's session behind [qr] ends (`pair.begin` `expires_s`, on the [Pairing] clock). */
+    val expiresAt: Long? = null,
     /** Increases with every `pair.begin` answer the screen shows, also when the code stayed the same. */
     val codeVersion: Int = 0,
     /** The shown code was replaced after someone may already have scanned the old one: they must scan again. */
@@ -58,7 +60,7 @@ data class PairingState(
  * every `pair.begin` and the lab image only within its 5-minute window, so this class keeps the session of the
  * last `pair.begin` and shows it again when the screen is opened again, instead of asking for a new one. It is
  * renewed only when less than a minute is left, after a lock or restart of the antenna (the salt is gone), or
- * when the antenna says it is gone (`E_NO_PAIRING`). Leaving the screen does not cancel it.
+ * when the antenna says it is gone (`E_NO_PAIRING`). Leaving the screen does not cancel it; only [finish] does.
  */
 class Pairing(
     private val antenna: AntennaManager,
@@ -72,17 +74,26 @@ class Pairing(
     private var refreshJob: Job? = null
     private var watchJob: Job? = null
 
+    /** The `pair.cancel` of [finish]; a following [begin] waits for it so it cannot wipe the new salt. */
+    private var cancelJob: Job? = null
+
     /** The antenna's pairing session behind [PairingState.qr]. */
     private data class Session(val qr: String, val expiresAt: Long, val unlockCount: Int, val deviceId: String?)
 
     @Volatile
     private var session: Session? = null
 
-    /** Shows this antenna's code: the open session when it is still good, else a new one. */
-    fun begin() {
+    /**
+     * Shows this antenna's code: the open session when it is still good, else a new one. With [autoRenew] the code
+     * is replaced a minute before the session ends; without it the code stays until the session is over, so a
+     * countdown on screen can end in "abgelaufen" instead of silently swapping a code someone may have scanned.
+     */
+    fun begin(autoRenew: Boolean = true) {
         track(AnalyticsEvent.PairingStarted)
         refreshJob?.cancel()
+        val cancelling = cancelJob
         refreshJob = scope.launch {
+            cancelling?.join()
             while (true) {
                 if (!antenna.state.value.ready) {
                     _state.update { it.copy(error = PairingError.ANTENNA_NOT_READY) }
@@ -102,8 +113,12 @@ class Pairing(
                     continue
                 }
                 _state.update {
-                    it.copy(qr = current.qr, codeVersion = it.codeVersion + 1, error = it.error.takeIf { e -> e != PairingError.ANTENNA_NOT_READY })
+                    it.copy(
+                        qr = current.qr, expiresAt = current.expiresAt, codeVersion = it.codeVersion + 1,
+                        error = it.error.takeIf { e -> e != PairingError.ANTENNA_NOT_READY },
+                    )
                 }
+                if (!autoRenew) return@launch
                 // Renew a minute before the end; after our own scan never, the peer may still scan this code.
                 withTimeoutOrNull((current.expiresAt - RENEW_BEFORE_MS - now()).coerceAtLeast(1_000)) {
                     _state.first { it.scannedName != null }
@@ -207,7 +222,9 @@ class Pairing(
         runCatching { antenna.call("pair.cancel") }
         val shown = _state.value.qr
         val fresh = newSession()
-        _state.update { it.copy(qr = fresh.qr, codeVersion = it.codeVersion + 1, codeRenewed = shown != null && shown != fresh.qr) }
+        _state.update {
+            it.copy(qr = fresh.qr, expiresAt = fresh.expiresAt, codeVersion = it.codeVersion + 1, codeRenewed = shown != null && shown != fresh.qr)
+        }
     }
 
     private fun watchConfirmation(contactId: Long) {
@@ -229,11 +246,14 @@ class Pairing(
         _state.value = PairingState()
     }
 
-    /** Both sides scanned and the peer's packet arrived: end the session on the antenna (`pair.cancel`). */
+    /**
+     * Ends the session on the antenna (`pair.cancel`): after both sides scanned and the peer's packet arrived, or
+     * when the user aborts the pairing. The next [begin] gets a new code.
+     */
     fun finish() {
         leave()
         session = null
-        scope.launch { runCatching { antenna.call("pair.cancel") } }
+        cancelJob = scope.launch { runCatching { antenna.call("pair.cancel") } }
     }
 
     fun clearError() = _state.update { it.copy(error = null, replaceCode = null) }

@@ -22,7 +22,6 @@ import ch.offgrid.android.domain.AntennaManager
 import ch.offgrid.android.domain.Conversation
 import ch.offgrid.android.domain.KeyPattern
 import ch.offgrid.android.domain.LocationError
-import ch.offgrid.android.domain.PairingError
 import ch.offgrid.android.domain.ResetResult
 import ch.offgrid.android.ui.LocalApp
 import ch.offgrid.android.ui.theme.Og
@@ -135,15 +134,6 @@ fun ResetResult.text(): String? = when (this) {
     ResetResult.UNKNOWN ->
         "Die Verbindung zur Antenne brach während des Zurücksetzens ab. Ob die Antenne zurückgesetzt wurde, ist unklar. " +
             "Steck sie neu ein und verbinde sie neu. Auf diesem Handy wurde nichts gelöscht oder geändert."
-}
-
-fun PairingError.text(): String = when (this) {
-    PairingError.INVALID_QR -> "Das ist kein OffGrid-Code."
-    PairingError.ANTENNA_NOT_READY -> "Antenne nicht verbunden. Der Schlüssel wird gesendet, sobald sie verbunden ist."
-    PairingError.CONTACT_EXISTS -> "Dieser Kontakt ist schon gespeichert. „Neu koppeln“ ersetzt eure Schlüssel; dein Gegenüber muss dich dann auch neu scannen."
-    PairingError.CODE_USED -> "Diesen Code hat die Antenne schon verwendet. Dein Gegenüber soll „Kontakt hinzufügen“ neu öffnen, dann scannst du den neuen Code."
-    PairingError.SELF_PAIR -> "Das ist dein eigener Code."
-    PairingError.FAILED -> "Der Schlüsselaustausch hat nicht geklappt. Versucht es erneut."
 }
 
 fun LocationError.text(): String = when (this) {

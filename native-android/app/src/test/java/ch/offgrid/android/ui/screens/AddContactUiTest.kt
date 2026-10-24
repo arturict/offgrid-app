@@ -30,15 +30,6 @@ class AddContactUiTest {
     }
 
     @Test
-    fun myCodeStepsWaitForTheCodeBeforeTheScan() {
-        assertEquals(listOf(StepState.Active, StepState.Todo, StepState.Todo), myCodeSteps(false, false).map { it.state })
-        val ready = myCodeSteps(codeReady = true, confirmed = false)
-        assertEquals(listOf(StepState.Done, StepState.Active, StepState.Todo), ready.map { it.state })
-        assertEquals(listOf("erledigt", "wartet …", null), ready.map { it.meta })
-        assertEquals(List(3) { StepState.Done }, myCodeSteps(codeReady = true, confirmed = true).map { it.state })
-    }
-
-    @Test
     fun scanStepsFollowThePingAndTheConfirmation() {
         assertEquals(listOf(StepState.Done, StepState.Active, StepState.Todo), scanSteps(false, false).map { it.state })
         val sent = scanSteps(pingSent = true, confirmed = false)
